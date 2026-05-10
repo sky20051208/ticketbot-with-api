@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# .NET / WPF (gui/)
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+.vs/
+
+# Per-instance Chrome user-data + 帶 cookie 的 config
+profiles/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Claude Code 本機設定
+.claude/settings.local.json
+
+# 打包檔
+*.zip
+
+# Log
+*.log

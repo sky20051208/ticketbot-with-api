@@ -17,15 +17,7 @@ else:
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-try:
-    from config import (
-        WANTED_TICKET_COUNT, WANTED_AREA_KEYWORD, WANTED_DATE_KEYWORD,
-        TARGET_TIME, TIME_WATCH_URL, ENABLE_TIME_WATCHER, AREA_AUTO_SELECT_MODE,
-        EXCLUDE_AREA_KEYWORD
-    )
-except ImportError:
-    print("❌ 找不到 config.py 或缺少必要變數")
-    sys.exit(1)
+import config
 
 from timeWatcher import TimeWatcher
 PAUSE_FILE = "pause.lock"
@@ -65,7 +57,7 @@ async def handle_kktix_event_page(tab):
     await check_pause()
     js = f"""
     (function() {{
-        let dateKeyword = '{WANTED_DATE_KEYWORD}'; 
+        let dateKeyword = '{config.DATE_KEYWORD}'; 
         let btns = document.querySelectorAll('a.btn-point, button.btn-primary');
         for (let btn of btns) {{
             if (btn.classList.contains('disabled')) continue;
@@ -91,14 +83,18 @@ async def run_kktix_setup():
     print("🚀 KKTIX 終極雙軌模式啟動。")
     print("🛡️ [系統] 載入光速注入、Angular 原生點擊、全動作回報與防禦機制")
     
+    kktix_args = ["--start-maximized", "--disable-notifications"]
+    if config.CURRENT_PROXY:
+        kktix_args.append(f"--proxy-server=http://{config.CURRENT_PROXY}")
+        print(f"[PROXY] KKTIX Chrome 走代理: {config.CURRENT_PROXY}")
     browser = await uc.start(
         headless=False,
-        browser_args=["--start-maximized", "--disable-notifications"]
+        browser_args=kktix_args,
     )
     
     try:
         now = datetime.now()
-        target_dt = datetime.strptime(TARGET_TIME, "%H:%M:%S").replace(
+        target_dt = datetime.strptime(config.TARGET_START_TIME, "%H:%M:%S").replace(
             year=now.year, month=now.month, day=now.day
         )
         activation_timestamp = int(target_dt.timestamp() * 1000)
@@ -137,10 +133,10 @@ async def run_kktix_setup():
             if (window.isBotFailed) return;
             if (window.isBotClicked) return;
 
-            let mode = '{AREA_AUTO_SELECT_MODE}';
-            let targetPrice = '{WANTED_AREA_KEYWORD}';
-            let excludeKeywords = '{EXCLUDE_AREA_KEYWORD}'; 
-            let count = parseInt('{WANTED_TICKET_COUNT}') || 1;
+            let mode = '{config.AREA_AUTO_SELECT_MODE}';
+            let targetPrice = '{config.AREA_KEYWORD}';
+            let excludeKeywords = '{config.EXCLUDE_AREA_KEYWORD}'; 
+            let count = parseInt('{config.TICKET_AMOUNT}') || 1;
 
             let rows = Array.from(document.querySelectorAll('.ticket-unit, tr[id^="ticket_"], .ticket-item'));
             if (rows.length === 0) {{
@@ -294,10 +290,10 @@ async def run_kktix_setup():
 async def main():
     browser, tab = await run_kktix_setup()
     
-    watcher = TimeWatcher(TARGET_TIME, TIME_WATCH_URL)
-    has_waited = not ENABLE_TIME_WATCHER
+    watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL)
+    has_waited = not config.ENABLE_TIME_WATCHER
 
-    print(f"\n⏳ 監控啟動！目標時間: {TARGET_TIME}")
+    print(f"\n⏳ 監控啟動！目標時間: {config.TARGET_START_TIME}")
 
     while True:
         try:

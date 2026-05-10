@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 
 namespace TicketBotWarRoom;
 
@@ -22,6 +23,67 @@ public partial class MainWindow : Window
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", ".."));
 
         BotGridDisplay.ItemsSource = _instances;
+
+        // 攔 Ctrl+V：繞過 WPF TextBoxBase.Paste() 對極長字串靜默失敗的問題
+        this.PreviewKeyDown += OnPreviewKeyDown_Paste;
+        // 攔右鍵 Paste（context menu / programmatic paste）
+        DataObject.AddPastingHandler(this, OnDataObjectPasting);
+    }
+
+    private void OnPreviewKeyDown_Paste(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.V || (Keyboard.Modifiers & ModifierKeys.Control) == 0) return;
+        if (Keyboard.FocusedElement is not TextBox tb || tb.IsReadOnly) return;
+
+        if (TryPasteFromClipboard(tb))
+            e.Handled = true;
+    }
+
+    private void OnDataObjectPasting(object sender, DataObjectPastingEventArgs e)
+    {
+        if (e.SourceDataObject == null) return;
+        if (Keyboard.FocusedElement is not TextBox tb || tb.IsReadOnly) return;
+
+        if (TryPasteFromClipboard(tb))
+            e.CancelCommand();  // 取消 WPF 原本的 paste 流程，因為我們已經自己塞好了
+    }
+
+    private bool TryPasteFromClipboard(TextBox tb)
+    {
+        string? text = null;
+        Exception? lastEx = null;
+        for (int i = 0; i < 5; i++)
+        {
+            try
+            {
+                if (Clipboard.ContainsText())
+                {
+                    text = Clipboard.GetText();
+                    break;
+                }
+                return false;  // clipboard 沒文字，讓 WPF 走自己的流程
+            }
+            catch (Exception ex)
+            {
+                lastEx = ex;
+                System.Threading.Thread.Sleep(20);
+            }
+        }
+
+        if (text == null)
+        {
+            MessageBox.Show(
+                $"Paste 失敗：Clipboard 讀取不到文字\n\n錯誤：{lastEx?.GetType().Name}: {lastEx?.Message}",
+                "Paste Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return true;  // 已處理（即便失敗），不要再走 WPF 原本流程
+        }
+
+        // 自己塞進 TextBox（取代當前選取，跟原生 paste 一致）
+        int newCaret = tb.SelectionStart + text.Length;
+        tb.SelectedText = text;
+        tb.SelectionStart = newCaret;
+        tb.SelectionLength = 0;
+        return true;
     }
 
     // ── 初始化格子 ──
@@ -57,6 +119,7 @@ public partial class MainWindow : Window
                 CfgTargetTime = "12:00:00",
                 CfgEnableTimer = true,
                 CfgWatchUrl = "",
+                CfgUseProxyPool = true,
                 CfgCookie = "",
                 CfgRunMode = "API模式",
             });
@@ -135,6 +198,18 @@ public partial class MainWindow : Window
 
         // 寫出 per-instance config JSON
         var configPath = Path.Combine(profileDir, "config.json");
+        // 計算視窗平鋪座標 (Chrome 視窗依 instance 數量等分螢幕工作區)
+        int n = _instances.Count;
+        int cols = n switch { 1 => 1, <= 4 => 2, <= 9 => 3, _ => 4 };
+        int rows = (int)Math.Ceiling((double)n / cols);
+        var wa = SystemParameters.WorkArea;
+        int winW = (int)(wa.Width / cols);
+        int winH = (int)(wa.Height / rows);
+        int col = inst.Id % cols;
+        int row = inst.Id / cols;
+        int winX = (int)wa.Left + col * winW;
+        int winY = (int)wa.Top + row * winH;
+
         var cfg = new Dictionary<string, object>
         {
             ["PLATFORM"] = inst.CfgPlatform,
@@ -149,6 +224,12 @@ public partial class MainWindow : Window
             ["TARGET_START_TIME"] = inst.CfgTargetTime,
             ["ENABLE_TIME_WATCHER"] = inst.CfgEnableTimer,
             ["TIME_WATCH_URL"] = inst.CfgWatchUrl,
+            ["ENABLE_PROXY_POOL"] = inst.CfgUseProxyPool,
+            ["ACC_ID"] = inst.Id,
+            ["WINDOW_X"] = winX,
+            ["WINDOW_Y"] = winY,
+            ["WINDOW_W"] = winW,
+            ["WINDOW_H"] = winH,
         };
         File.WriteAllText(configPath,
             JsonSerializer.Serialize(cfg, new JsonSerializerOptions { WriteIndented = true }));
@@ -172,6 +253,7 @@ public partial class MainWindow : Window
             StandardOutputEncoding = System.Text.Encoding.UTF8,
             StandardErrorEncoding = System.Text.Encoding.UTF8,
         };
+        psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
 
         var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
 
@@ -282,15 +364,29 @@ public class BotInstance : INotifyPropertyChanged
     private string _cfgWatchUrl = "";
     public string CfgWatchUrl { get => _cfgWatchUrl; set { _cfgWatchUrl = value; N(); } }
 
+    private bool _cfgUseProxyPool = false;
+    public bool CfgUseProxyPool { get => _cfgUseProxyPool; set { _cfgUseProxyPool = value; N(); } }
+
     private string _cfgRunMode = "API模式";
     public string CfgRunMode { get => _cfgRunMode; set { _cfgRunMode = value; N(); } }
 
     // ── Log ──
     private const int MaxLogLen = 50_000;
+    private const string TimerPrefix = "[TIMER] 倒數";
     public void AppendLog(string line)
     {
         if (_logs.Length > MaxLogLen)
             _logs = _logs[(_logs.Length - MaxLogLen / 2)..];
+
+        // 倒數 tick：覆蓋上一行（如果上一行也是倒數 tick），讓 GUI 呈現單行計時器
+        if (line.StartsWith(TimerPrefix))
+        {
+            int lastNl = _logs.TrimEnd('\n').LastIndexOf('\n');
+            string prev = lastNl < 0 ? _logs.TrimEnd('\n') : _logs[(lastNl + 1)..].TrimEnd('\n');
+            if (prev.StartsWith(TimerPrefix))
+                _logs = (lastNl < 0 ? "" : _logs[..(lastNl + 1)]);
+        }
+
         _logs += line + "\n";
         N(nameof(Logs));
     }

@@ -1,0 +1,267 @@
+/* ─── Minecraft palette ─── */
+:root {
+  --stone-light: #a4a4a4;
+  --stone-mid:   #828282;
+  --stone-dark:  #5c5c5c;
+  --stone-shadow:#1c1c1c;
+  --bevel-dark:  #3f3f3f;
+  --bevel-light: #6f6f6f;
+  --grass:       #5fa734;
+  --grass-hi:    #7fbf54;
+  --dirt:        #8b6f47;
+  --diamond:     #5dc9c9;
+  --redstone:    #c92e2e;
+  --gold:        #ffaa00;
+  --mc-yellow:   #ffdb28;
+  --text:        #ffffff;
+  --text-dim:    #a0a0a0;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  color: var(--text);
+  background: linear-gradient(180deg, #3f3f3f 0%, #2a2a2a 50%, #3f3f3f 100%);
+  min-height: 100vh;
+  user-select: none;
+}
+input, select, .log { user-select: text; }
+
+/* ─── Top bar ─── */
+.topbar {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  border-bottom: 3px solid var(--stone-shadow);
+  background: linear-gradient(180deg,
+    var(--grass) 0%, var(--grass) 35%,
+    var(--dirt)  40%, var(--dirt) 100%);
+  gap: 14px;
+}
+.logo { display: flex; align-items: center; gap: 14px; }
+.block-icon {
+  width: 48px; height: 48px;
+  background:
+    linear-gradient(180deg,
+      var(--grass-hi) 0 6px, var(--grass) 6px 22px,
+      var(--dirt) 22px 100%);
+  border: 2px solid var(--stone-shadow);
+  position: relative;
+}
+.block-icon::after, .block-icon::before {
+  content: ""; position: absolute; width: 6px; height: 6px;
+  background: #6b5237;
+}
+.block-icon::before { left: 6px; top: 30px; }
+.block-icon::after  { right: 8px; top: 30px; }
+
+.title { font-size: 22px; font-weight: bold; color: var(--mc-yellow);
+  text-shadow: 2px 2px 0 var(--bevel-dark); }
+.subtitle { font-size: 10px; font-weight: bold; color: var(--text); margin-top: 2px; }
+
+.controls { display: flex; align-items: center; gap: 8px; margin-left: 30px; }
+.lbl { font-size: 11px; font-weight: bold; }
+
+/* ─── Buttons (MC bevel) ─── */
+.btn {
+  position: relative;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--text);
+  border: 2px solid var(--stone-shadow);
+  cursor: pointer;
+  outline: none;
+  background: var(--stone-mid);
+  box-shadow:
+    inset  2px  2px 0 rgba(255,255,255,0.45),
+    inset -2px -2px 0 rgba(0,0,0,0.45);
+}
+.btn:hover { color: var(--mc-yellow); }
+.btn:active {
+  box-shadow:
+    inset -2px -2px 0 rgba(255,255,255,0.45),
+    inset  2px  2px 0 rgba(0,0,0,0.45);
+}
+.btn-green  { background: var(--grass); }
+.btn-red    { background: var(--redstone); }
+.btn-yellow { background: var(--gold); color: var(--stone-shadow); }
+.btn-cyan   { background: var(--stone-mid); }
+
+/* ─── Inputs (MC inset) ─── */
+.fld {
+  background: #000;
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 6px;
+  border: 2px solid var(--bevel-dark);
+  outline: none;
+  width: 100%;
+}
+.fld:focus { border-color: var(--mc-yellow); }
+select.fld {
+  background: var(--bevel-dark);
+  color: #fff;
+  font-weight: bold;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 18px;
+  background-image: linear-gradient(45deg, transparent 50%, #fff 50%),
+                    linear-gradient(135deg, #fff 50%, transparent 50%);
+  background-position: calc(100% - 10px) calc(50% - 2px), calc(100% - 6px) calc(50% - 2px);
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
+}
+.select-narrow { width: 110px; }
+input.cookie { font-size: 11px; }
+
+/* ─── Grid (固定卡片寬度，自動換行) ─── */
+#grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px;
+  align-content: flex-start;
+}
+
+/* ─── Card (MC inventory panel) ─── */
+.card {
+  width: 720px;
+  flex-shrink: 0;
+  background: var(--stone-shadow);
+  padding: 3px;
+}
+.card-inner {
+  background: var(--stone-mid);
+  border: 2px solid;
+  border-color: var(--bevel-dark) var(--stone-light) var(--stone-light) var(--bevel-dark);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.diamond {
+  width: 14px; height: 14px;
+  background: var(--diamond);
+  position: relative;
+  border: 1px solid var(--stone-shadow);
+}
+.diamond::after {
+  content: ""; position: absolute;
+  width: 4px; height: 4px; left: 2px; top: 2px;
+  background: #fff;
+}
+.card-name {
+  font-weight: bold; color: var(--mc-yellow); font-size: 14px;
+  text-shadow: 2px 2px 0 var(--bevel-dark);
+}
+.status {
+  font-size: 11px; font-weight: bold; color: #fff;
+  margin-left: 4px;
+}
+.spacer { flex: 1; }
+
+.divider {
+  height: 2px;
+  background: linear-gradient(90deg, transparent 0%, var(--stone-shadow) 50%, transparent 100%);
+}
+
+/* ─── Config panel ─── */
+.config-panel {
+  background: var(--bevel-light);
+  border: 2px solid;
+  border-color: var(--bevel-dark) var(--stone-light) var(--stone-light) var(--bevel-dark);
+  padding: 8px 10px;
+}
+.fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 0.6fr;
+  gap: 6px 8px;
+}
+.field { display: flex; flex-direction: column; }
+.field label {
+  font-size: 11px; font-weight: bold; color: var(--text-dim);
+  margin-bottom: 2px;
+}
+.field.f-narrow { /* default */ }
+.field.f-wide { grid-column: span 2; }
+.field.f-full { grid-column: 1 / -1; }
+.flags { justify-content: flex-end; gap: 2px; }
+.check {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: bold; cursor: pointer;
+}
+.check input { accent-color: var(--mc-yellow); }
+
+/* ─── Log box (VSCode-style fixed-size terminal) ─── */
+.log-box {
+  background: #1e1e1e;
+  border: 1px solid #000;
+  height: 280px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.log-head {
+  background: #2d2d30;
+  color: #cccccc;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: normal;
+  border-bottom: 1px solid #1c1c1c;
+  letter-spacing: 0.4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.term-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #6e6e6e;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.card.running .term-dot { background: #5fa734; box-shadow: 0 0 4px #5fa734; }
+.card.stopped .term-dot { background: #c92e2e; }
+.term-title { font-family: "Segoe UI", sans-serif; }
+.term-meta { color: #858585; font-size: 10px; margin-left: auto; }
+.log {
+  margin: 0;
+  padding: 8px 12px;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+.log::-webkit-scrollbar { width: 10px; height: 10px; }
+.log::-webkit-scrollbar-track { background: transparent; }
+.log::-webkit-scrollbar-thumb {
+  background: #424242;
+  border: 2px solid #1e1e1e;
+  border-radius: 5px;
+}
+.log::-webkit-scrollbar-thumb:hover { background: #585858; }
+.log::-webkit-scrollbar-corner { background: #1e1e1e; }
+
+.log-err   { color: #f48771; }
+.log-timer { color: #dcdcaa; }
+.log-pause { color: #4ec9b0; }
+.log-exit  { color: #c586c0; }
+.log-info  { color: #9cdcfe; }

@@ -23,11 +23,7 @@ if root_dir not in sys.path:
     sys.path.append(root_dir)
 
 from timeWatcher import TimeWatcher
-from config import (
-    WANTED_TICKET_COUNT, WANTED_AREA_KEYWORD, WANTED_DATE_KEYWORD, 
-    TARGET_TIME, TIME_WATCH_URL, ENABLE_TIME_WATCHER,
-    AREA_AUTO_SELECT_MODE 
-)
+import config
 
 PAUSE_FILE = "pause.lock"
 
@@ -52,7 +48,7 @@ async def try_find_and_click_activity(tab, timeout=5):
     防止爬到父容器導致日期誤判
     """
     start_time = time.time()
-    date_keyword = WANTED_DATE_KEYWORD.strip()
+    date_keyword = config.DATE_KEYWORD.strip()
 
     js = f"""
     (function() {{
@@ -135,15 +131,15 @@ async def try_find_and_order(tab, tickets_added_flag, timeout=5):
     2. 放棄依賴 v-expansion-panel class，改抓 button 的父層結構。
     3. 完整支援「熱賣中」判定與所有選位策略。
     """
-    try: count = int(WANTED_TICKET_COUNT)
+    try: count = int(config.TICKET_AMOUNT)
     except: count = 1
     
     js_added_flag = "true" if tickets_added_flag else "false"
-    select_mode = str(AREA_AUTO_SELECT_MODE).strip()
+    select_mode = str(config.AREA_AUTO_SELECT_MODE).strip()
 
     js = f"""
     (function() {{
-        let rawWanted = '{WANTED_AREA_KEYWORD}';
+        let rawWanted = '{config.AREA_KEYWORD}';
         let wanted = rawWanted.replace(/[$,\\s]/g, '');
         let count = {count};
         let added = {js_added_flag};
@@ -392,14 +388,18 @@ async def try_find_and_order(tab, tickets_added_flag, timeout=5):
 
 async def run_ticketplus_setup():
     print("🚀 TicketPlus (V8+ 持續掃描版) 啟動...")
-    browser = await uc.start(headless=False, browser_args=["--start-maximized", "--disable-notifications"])
+    tp_args = ["--start-maximized", "--disable-notifications"]
+    if config.CURRENT_PROXY:
+        tp_args.append(f"--proxy-server=http://{config.CURRENT_PROXY}")
+        print(f"[PROXY] TicketPlus Chrome 走代理: {config.CURRENT_PROXY}")
+    browser = await uc.start(headless=False, browser_args=tp_args)
     tab = await browser.get("https://ticketplus.com.tw/")
     return browser, tab
 
 async def main():
     browser, tab = await run_ticketplus_setup()
-    watcher = TimeWatcher(TARGET_TIME, TIME_WATCH_URL)
-    has_waited = not ENABLE_TIME_WATCHER
+    watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL)
+    has_waited = not config.ENABLE_TIME_WATCHER
     
     tickets_added = False
     order_submitted = False

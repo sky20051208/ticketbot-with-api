@@ -8,11 +8,15 @@ import random
 import time
 import os
 from datetime import datetime
-from config import WANTED_TICKET_COUNT, WANTED_AREA_KEYWORD, WANTED_DATE_KEYWORD, Selector, TARGET_TIME, TIME_WATCH_URL, AREA_AUTO_SELECT_MODE, ENABLE_TIME_WATCHER, EXCLUDE_AREA_KEYWORD, PRE_ORDER_CODE
+import config
 from timeWatcher import TimeWatcher
 from captchaAI.predict import solve_captcha_nodriver
 
 PAUSE_FILE = "pause.lock"
+
+# 拓元驗證碼 DOM 元素 ID
+CAPTCHA_INPUT_ID = "TicketForm_verifyCode"
+CAPTCHA_IMAGE_ID = "TicketForm_verifyCode-image"
 #打包指令1 pyinstaller --onedir --name=TicketBot --exclude-module=config --hidden-import=selenium --hidden-import=selenium.webdriver.common.by --collect-all ddddocr main.py
 #打包指令2 pyinstaller --onefile --name=Launcher --exclude-module=config gui.py
 
@@ -32,7 +36,7 @@ async def random_sleep(min_s=0.2, max_s=0.5):
 
 async def pre_fill_form(tab):
     """預填表單"""
-    num = WANTED_TICKET_COUNT
+    num = config.TICKET_AMOUNT
     js = f"""
     (function() {{
         let selects = document.querySelectorAll('.mobile-select');
@@ -56,7 +60,7 @@ async def submit_order_nodriver(tab, captcha_code: str):
     try:
         fill_js = f"""
         (function() {{
-            var input = document.getElementById('{Selector.CAPTCHA_INPUT[1]}');
+            var input = document.getElementById('{CAPTCHA_INPUT_ID}');
             if (input) {{
                 input.value = '{captcha_code}';
                 var btn = document.querySelector('button[type="submit"]');
@@ -75,7 +79,7 @@ async def submit_order_nodriver(tab, captcha_code: str):
 async def refresh_captcha_nodriver(tab):
     """刷新驗證碼"""
     try:
-        await tab.evaluate(f"document.getElementById('{Selector.CAPTCHA_IMAGE[1]}').click();")
+        await tab.evaluate(f"document.getElementById('{CAPTCHA_IMAGE_ID}').click();")
         await asyncio.sleep(0.15)
         return True
     except:
@@ -87,9 +91,9 @@ async def refresh_captcha_nodriver(tab):
 
 async def handle_verify_page(tab):
     await check_pause()
-    print(f"🔐 [驗證頁] 準備輸入預購碼: {PRE_ORDER_CODE}...")
+    print(f"🔐 [驗證頁] 準備輸入預購碼: {config.PRESALE_CODE}...")
 
-    if not PRE_ORDER_CODE:
+    if not config.PRESALE_CODE:
         print("⚠️ 警告：未設定預購碼！")
         await asyncio.sleep(0.5)
         return
@@ -101,7 +105,7 @@ async def handle_verify_page(tab):
                   || document.querySelector("input.greyInput[name='checkCode']");
 
         if (input) {{
-            input.value = '{PRE_ORDER_CODE}';
+            input.value = '{config.PRESALE_CODE}';
             input.dispatchEvent(new Event('input', {{ bubbles: true }}));
 
             var btn = document.querySelector("#form-ticket-verify button[type='submit']")
@@ -142,17 +146,17 @@ async def handle_game_page(tab):
         return
     # ==========================================
 
-    if "activity/detail" in current_url and "activity/game" in TIME_WATCH_URL:
-        print(f"🚀 [場次頁] 偵測到詳情頁，強制跳轉至: {TIME_WATCH_URL}")
-        await tab.get(TIME_WATCH_URL)
+    if "activity/detail" in current_url and "activity/game" in config.TIME_WATCH_URL:
+        print(f"🚀 [場次頁] 偵測到詳情頁，強制跳轉至: {config.TIME_WATCH_URL}")
+        await tab.get(config.TIME_WATCH_URL)
         return
 
-    search_msg = f"關鍵字 '{WANTED_DATE_KEYWORD}'" if WANTED_DATE_KEYWORD else "任意場次"
+    search_msg = f"關鍵字 '{config.DATE_KEYWORD}'" if config.DATE_KEYWORD else "任意場次"
     print(f"👀 [場次頁] 搜尋: {search_msg} 立即訂購...")
 
     scan_js = f"""
     (function() {{
-        const keyword = '{WANTED_DATE_KEYWORD}';
+        const keyword = '{config.DATE_KEYWORD}';
         const tags = ["button", "div", "a"];
 
         function isValidBtn(el) {{
@@ -198,8 +202,8 @@ async def handle_game_page(tab):
         print(f"🔥 [場次頁] 鎖定目標，點擊成功！")
         await asyncio.sleep(0.5)
     else:
-        if WANTED_DATE_KEYWORD:
-            print(f"⚠️ [場次頁] 找不到符合 '{WANTED_DATE_KEYWORD}' 且可購買的場次，刷新...")
+        if config.DATE_KEYWORD:
+            print(f"⚠️ [場次頁] 找不到符合 '{config.DATE_KEYWORD}' 且可購買的場次，刷新...")
         else:
             print("⚠️ [場次頁] 暫無可購買按鈕，刷新...")
         await tab.reload()
@@ -210,10 +214,10 @@ async def handle_game_page(tab):
 
 async def handle_area_page(tab):
     await check_pause()
-    strategy = AREA_AUTO_SELECT_MODE
-    exclude_keyword = EXCLUDE_AREA_KEYWORD if 'EXCLUDE_AREA_KEYWORD' in globals() else ""
+    strategy = config.AREA_AUTO_SELECT_MODE
+    exclude_keyword = config.EXCLUDE_AREA_KEYWORD
 
-    print(f"🎯 [選區頁] 策略: {strategy} | 關鍵字: {WANTED_AREA_KEYWORD}")
+    print(f"🎯 [選區頁] 策略: {strategy} | 關鍵字: {config.AREA_KEYWORD}")
 
     try:
         await tab.wait_for(".select_form_a, .select_form_b, .zone", timeout=0.3)
@@ -231,7 +235,7 @@ async def handle_area_page(tab):
     js_script = f"""
     (function() {{
         const mode = '{mode_js_var}';
-        const keyword = '{WANTED_AREA_KEYWORD}';
+        const keyword = '{config.AREA_KEYWORD}';
         const excludes = '{exclude_keyword}'.split(';').filter(e => e.trim());
 
         let links = Array.from(document.querySelectorAll('.select_form_a a, .select_form_b a, .zone a'));
@@ -443,29 +447,33 @@ async def wait_for_tab_stable(tab, keyword="tixcraft.com", max_wait=10):
 # 啟動流程（V15.0 - Live Nation 新分頁追蹤版）
 # ----------------------------------------------------
 
-async def run_initial_setup():
-    print("🚀 啟動 nodriver (V15.0 - Live Nation 新分頁追蹤版)...")
+async def run_initial_setup(user_data_dir_override=None, extra_args=None):
+    print("🚀 啟動 nodriver (V18.0 - War-Room 多開版)...")
 
-    user_data_dir = os.path.abspath("./chrome_profile")
+    user_data_dir = user_data_dir_override or os.path.abspath("./chrome_profile")
+
+    browser_args = [
+        "--start-maximized",
+        "--disable-notifications",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-dev-shm-usage",
+    ]
+    if extra_args:
+        browser_args.extend(extra_args)
 
     browser = await uc.start(
         headless=False,
         user_data_dir=user_data_dir,
-        browser_args=[
-            "--start-maximized",
-            "--disable-notifications",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-        ]
+        browser_args=browser_args,
     )
 
     # ================================================
     # 判斷入口：Live Nation 預購 vs 一般模式
     # ================================================
 
-    # Live Nation 模式：TIME_WATCH_URL 為空，或明確設定為 "live_nation" 觸發
+    # Live Nation 模式：config.TIME_WATCH_URL 為空，或明確設定為 "live_nation" 觸發
     # 實際判斷條件請依你的 config 調整
-    is_live_nation_mode = (not TIME_WATCH_URL) or ("live_nation" in TIME_WATCH_URL.lower())
+    is_live_nation_mode = (not config.TIME_WATCH_URL) or ("live_nation" in config.TIME_WATCH_URL.lower())
 
     if is_live_nation_mode:
         # ============================================
@@ -547,20 +555,20 @@ async def run_initial_setup():
         except:
             pass
 
-        if ENABLE_TIME_WATCHER:
+        if config.ENABLE_TIME_WATCHER:
             print("\n🛑 [待命模式] 等待倒數...")
-            watcher = TimeWatcher(TARGET_TIME, TIME_WATCH_URL)
+            watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL)
             await watcher.wait_for_open_async()
             print(f"⚡ 時間到！直連...")
 
             current_url = await tab.evaluate("window.location.href")
-            if TIME_WATCH_URL not in current_url:
-                await tab.get(TIME_WATCH_URL)
+            if config.TIME_WATCH_URL not in current_url:
+                await tab.get(config.TIME_WATCH_URL)
             else:
                 await tab.reload()
         else:
             print("\n🚀 [即時模式] 請手動進入活動頁...")
-            target_id = TIME_WATCH_URL.split("/")[-1]
+            target_id = config.TIME_WATCH_URL.split("/")[-1]
             print(f"   目標: {target_id}")
 
             while True:
@@ -569,7 +577,7 @@ async def run_initial_setup():
                     current_url = await tab.evaluate("window.location.href")
                     if f"/activity/detail/{target_id}" in current_url:
                         print(f"⚡ 偵測到目標頁！跳轉...")
-                        await tab.get(TIME_WATCH_URL)
+                        await tab.get(config.TIME_WATCH_URL)
                         break
                     if f"/activity/game/{target_id}" in current_url:
                         print("✅ 已在場次頁")

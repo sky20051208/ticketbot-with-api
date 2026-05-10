@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>MINECRAFT TICKET BOT</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="logo">
+      <div class="block-icon"></div>
+      <div class="title-stack">
+        <div class="title">MINECRAFT</div>
+        <div class="subtitle">T I C K E T &nbsp;B O T &nbsp;·&nbsp; v 1 . 0 &nbsp;·&nbsp; W E B</div>
+      </div>
+    </div>
+    <div class="controls">
+      <span class="lbl">INSTANCES</span>
+      <input id="instance-count" type="text" value="2" class="fld" style="width:48px;text-align:center;">
+      <button id="btn-init" class="btn btn-cyan">INIT</button>
+      <button id="btn-start-all" class="btn btn-green">START ALL</button>
+      <button id="btn-stop-all" class="btn btn-red">STOP ALL</button>
+    </div>
+  </header>
+  <main id="grid"></main>
+
+  <template id="card-template">
+    <section class="card">
+      <div class="card-inner">
+        <div class="card-head">
+          <div class="diamond"></div>
+          <span class="card-name"></span>
+          <select class="fld f-runmode select-narrow"></select>
+          <span class="status"></span>
+          <span class="spacer"></span>
+          <button class="btn btn-green btn-start">START</button>
+          <button class="btn btn-yellow btn-pause">PAUSE</button>
+          <button class="btn btn-red btn-stop">STOP</button>
+        </div>
+        <div class="divider"></div>
+        <div class="config-panel">
+          <div class="fields">
+            <div class="field"><label>PLATFORM</label><select class="fld f-platform"></select></div>
+            <div class="field"><label>ACTIVITY SLUG</label><input class="fld f-slug" type="text"></div>
+            <div class="field"><label>START TIME</label><input class="fld f-time" type="text"></div>
+            <div class="field f-narrow"><label>QTY</label><input class="fld f-qty" type="text"></div>
+
+            <div class="field"><label>AREA MODE</label><select class="fld f-areamode"></select></div>
+            <div class="field"><label>AREA KEYWORD</label><input class="fld f-area" type="text"></div>
+            <div class="field"><label>EXCLUDE (;)</label><input class="fld f-exclude" type="text"></div>
+            <div class="field f-narrow"><label>DATE</label><input class="fld f-date" type="text"></div>
+
+            <div class="field"><label>PRESALE CODE</label><input class="fld f-presale" type="text"></div>
+            <div class="field f-wide"><label>WATCH URL (BROWSER MODE)</label><input class="fld f-watchurl" type="text"></div>
+            <div class="field f-narrow flags">
+              <label class="check"><input type="checkbox" class="f-timer"><span>TIMER</span></label>
+              <label class="check"><input type="checkbox" class="f-proxy"><span>PROXY POOL</span></label>
+            </div>
+
+            <div class="field f-full"><label>COOKIE</label><input class="fld f-cookie cookie" type="text"></div>
+          </div>
+        </div>
+        <div class="log-box">
+          <div class="log-head">
+            <span class="term-dot"></span>
+            <span class="term-title">TERMINAL</span>
+            <span class="term-meta"></span>
+          </div>
+          <pre class="log"></pre>
+        </div>
+      </div>
+    </section>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

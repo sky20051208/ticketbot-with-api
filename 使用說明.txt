@@ -1,0 +1,152 @@
+搶票機器人使用說明
+==========================================
+
+支援拓元（Tixcraft）/ KKTIX / TicketPlus 三大平台。
+網頁版 War-Room 介面，可同時操作多個帳號。
+
+
+【一、系統需求】
+------------------------------------------
+
+1. Windows 10 / 11
+2. Python 3.10 ~ 3.12（不能裝 3.13）
+   下載：https://www.python.org/downloads/
+   安裝時務必把最下面的「Add Python to PATH」打勾，
+   否則之後 setup.bat 會找不到 Python。
+3. Google Chrome（瀏覽器模式才需要；多數人本來就有）
+
+
+【二、第一次安裝（5~10 分鐘）】
+------------------------------------------
+
+1. 把這整個資料夾解壓到任意位置
+   （例：D:\ticketbot；路徑不要有中文或空白比較保險）
+2. 雙擊 setup.bat
+3. 等它跑完——黑窗顯示「Setup complete!」就 OK
+4. 之後不用再跑 setup.bat（除非要更新套件）
+
+如果中途出現紅色 [ERROR]，截圖訊息問給你檔案的人。
+
+
+【三、每次搶票】
+------------------------------------------
+
+1. 雙擊 start.bat
+   黑窗開啟、瀏覽器自動跳到 http://127.0.0.1:7860
+2. 在網頁上設定（見下方「網頁 GUI 操作」）
+3. 開搶前 5 分鐘按 START ALL
+4. 結束後關掉黑窗，所有 bot 會一起停
+
+
+【四、網頁 GUI 操作】
+------------------------------------------
+
+▼ 設定要開幾組（多開）
+
+  - 上方 INSTANCES 框輸入數字（例 2 = 兩組同時搶）
+  - 按 INIT 建立卡片
+
+
+▼ 每張卡片要填的東西
+
+  ┌──────────────┬─────────────────────────────────────────┐
+  │ 模式選單      │ API模式（拓元，最快）                    │
+  │              │ 瀏覽器模式（KKTIX、TicketPlus 必選）     │
+  │ PLATFORM     │ TIXCRAFT / KKTIX / TICKETPLUS            │
+  │ ACTIVITY SLUG│ 活動代號（活動網址最後一段）             │
+  │              │ 例：26_mj116kh_r                         │
+  │ START TIME   │ 開賣時間 24 小時制，例：12:00:00         │
+  │ QTY          │ 張數                                     │
+  │ AREA MODE    │ 選位策略：                               │
+  │              │   關鍵字優先 / 由上而下 / 由下而上 / 隨機 │
+  │ AREA KEYWORD │ 想要的區或票價關鍵字（例：5800）         │
+  │ EXCLUDE (;)  │ 不要的區，分號隔開                       │
+  │              │ 例：輪椅;身障;Restricted View            │
+  │ DATE         │ 場次日期關鍵字（多場次活動才用）         │
+  │ PRESALE CODE │ 會員碼（沒有就空著）                     │
+  │ WATCH URL    │ 瀏覽器模式定時開搶要監控的頁面網址       │
+  │ TIMER        │ 勾＝定時開搶；不勾＝立刻開搶             │
+  │ PROXY POOL   │ ★ 一律不要勾（除非你自己有 proxy）      │
+  │ COOKIE       │ 你的登入 cookie（見下方教學）            │
+  └──────────────┴─────────────────────────────────────────┘
+
+  欄位改了會自動存檔，不用按存檔鍵。
+
+
+▼ 怎麼拿 COOKIE（拓元為例）
+
+  1. 用 Chrome 打開 https://tixcraft.com 並「登入」你的帳號
+  2. 鍵盤按 F12 打開開發者工具
+  3. 上方分頁切到「Console」
+  4. 貼上這行按 Enter：
+
+         copy(document.cookie)
+
+  5. cookie 字串就被複製到剪貼簿了
+  6. 回到網頁 GUI，貼到 COOKIE 欄位（Ctrl+V）
+
+  KKTIX / TicketPlus 同理：去那個網站登入後，
+  在 Console 跑 copy(document.cookie) 即可。
+
+  ★ COOKIE 等於你的帳號登入狀態，不要外流。
+
+
+▼ START / PAUSE / STOP / START ALL / STOP ALL
+
+  START      啟動該卡片的 bot
+             （瀏覽器模式會自動開一個 Chrome 視窗）
+  PAUSE      暫停在當下、不繼續打 server；再按一次繼續
+  STOP       直接關掉這張卡片的 bot
+  START ALL  一鍵啟動全部卡片
+  STOP ALL   一鍵停掉全部卡片
+
+
+【五、常見問題】
+------------------------------------------
+
+Q. 我裝了 Python，但 setup.bat 說找不到。
+A. 重跑 Python 安裝程式 → 選 Modify
+   → 確認「Add Python to PATH」有打勾，然後 Next 重裝
+   → 重啟電腦再跑 setup.bat。
+
+Q. setup.bat 裝套件裝到一半失敗。
+A. 多半是網路問題，重跑一次。
+   如果固定卡在某個套件，截圖訊息問。
+
+Q. 瀏覽器模式按 START 但沒開 Chrome。
+A. 確認電腦有裝 Google Chrome（Edge 不算）。
+
+Q. 拓元搶到一半 cookie 失效（log 出現 Cookie 失效）。
+A. 重新登入拓元 → Console 跑 copy(document.cookie)
+   → 貼新的 cookie 進 GUI → 重 START。
+
+Q. 驗證碼一直辨識錯。
+A. ddddocr 不是 100%，難的字會錯。
+   程式設定 5 次內會自動換一張重試，平均都搶得到。
+
+Q. 黑窗一閃就關掉。
+A. 不要直接點 .py，要點 setup.bat / start.bat。
+   如果是 .bat 也閃退，從黑窗手動跑（cmd cd 到資料夾，輸入 setup.bat），
+   就能看到完整錯誤訊息。
+
+Q. setup.bat 開起來只看到「Python 3.10.11」+「按任意鍵」就退出。
+A. 表示 cmd 把 .bat 換行格式吃壞了。
+   解法：用滑鼠右鍵 setup.bat → 內容 → 確認檔案沒被防毒清理或編輯器
+   存成 LF-only。最快做法：重新解壓一次原始 zip 就好。
+
+Q. 網頁打不開（127.0.0.1:7860 拒絕連線）。
+A. 確認 start.bat 黑窗還開著、有看到 "Uvicorn running" 訊息。
+   防火牆第一次跳出來時要按「允許」。
+
+
+【六、要更新（如果之後拿到新版）】
+------------------------------------------
+
+1. 解壓新版到「新資料夾」（不要蓋舊的）
+2. 把舊資料夾裡的 profiles\ 複製到新資料夾
+   （這樣保留你的卡片設定）
+3. 對新資料夾跑一次 setup.bat（重裝套件）
+4. 之後跑新版的 start.bat
+
+==========================================
+祝搶票順利！

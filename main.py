@@ -1,8 +1,9 @@
-# main.py (正式版 V17.1 - 支援跨分頁追蹤)
+# main.py (正式版 V18.0 - 支援多開 War-Room)
 
 import sys
 import os
 import asyncio
+import argparse
 import nodriver as uc
 
 # 路徑設定 (保持不變)
@@ -14,7 +15,8 @@ else:
     sys.path.append(application_path)
 
 # 匯入設定檔與拓元模組
-from config import PLATFORM, TIME_WATCH_URL
+import config
+import proxy_pool
 from bot import run_initial_setup, handle_game_page, handle_area_page, handle_ticket_page, handle_verify_page, check_pause
 
 # [匯入] KKTIX 模組
@@ -29,13 +31,42 @@ try:
 except ImportError:
     ticketplusbot = None
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--acc", type=int, default=None,
+                        help="帳號 ID（War-Room 多開用）")
+    parser.add_argument("--config", type=str, default=None,
+                        help="JSON config 檔路徑（GUI War-Room 用）")
+    return parser.parse_args()
+
+
+def load_config_override(config_path):
+    """從 JSON 覆蓋 config 模組的值"""
+    import json as _json
+    with open(config_path, "r", encoding="utf-8") as f:
+        overrides = _json.load(f)
+    for key, val in overrides.items():
+        if hasattr(config, key):
+            setattr(config, key, val)
+    print(f"[CONFIG] 已載入: {config_path}")
+
+
 async def main():
-    print(f"--- 搶票輔助機器人 V17.1 (目前平台: {PLATFORM}) ---")
+    args = parse_args()
+    acc_id = args.acc
+
+    if args.config:
+        load_config_override(args.config)
+
+    proxy_pool.acquire()
+
+    label = f" ACC-{acc_id}" if acc_id is not None else ""
+    print(f"--- 搶票輔助機器人 V18.0{label} (目前平台: {config.PLATFORM}) ---")
     
     # === 根據平台選擇進入點 ===
     
     # 1. KKTIX 模式
-    if PLATFORM == "KKTIX":
+    if config.PLATFORM == "KKTIX":
         if kktix_bot:
             await kktix_bot.main()
         else:
@@ -43,7 +74,7 @@ async def main():
         return
 
     # 2. TicketPlus 遠大模式
-    elif PLATFORM == "TICKETPLUS":
+    elif config.PLATFORM == "TICKETPLUS":
         if ticketplusbot:
             print("🚀 啟動遠大售票 (TicketPlus) 模組...")
             await ticketplusbot.main()
@@ -52,14 +83,56 @@ async def main():
         return
 
     # 3. 預設模式: 拓元 (Tixcraft)
+    # 多開模式：隔離 profile + proxy
+    browser_extra_args = []
+    user_data_dir = None
+
+    if acc_id is not None:
+        user_data_dir = os.path.abspath(f"./profiles/acc_{acc_id}")
+        os.makedirs(user_data_dir, exist_ok=True)
+        port = 9222 + acc_id
+        browser_extra_args.append(f"--remote-debugging-port={port}")
+        print(f"[WAR-ROOM] Profile: {user_data_dir} | Debug Port: {port}")
+
+    # 視窗平鋪（GUI 多開用）
+    if config.WINDOW_X >= 0 and config.WINDOW_Y >= 0:
+        browser_extra_args.append(f"--window-position={config.WINDOW_X},{config.WINDOW_Y}")
+    if config.WINDOW_W > 0 and config.WINDOW_H > 0:
+        browser_extra_args.append(f"--window-size={config.WINDOW_W},{config.WINDOW_H}")
+
+    if config.CURRENT_PROXY:
+        browser_extra_args.append(f"--proxy-server=http://{config.CURRENT_PROXY}")
+        print(f"[PROXY] Chrome 走代理: {config.CURRENT_PROXY}")
+
     try:
-        browser, tab = await run_initial_setup()
+        browser, tab = await run_initial_setup(
+            user_data_dir_override=user_data_dir,
+            extra_args=browser_extra_args,
+        )
     except Exception as e:
         print(f"❌ 啟動失敗: {e}")
         input("按 Enter 鍵退出...") 
         return
     
     if not tab: return
+
+    # 視窗標題前綴注入（讓 Alt+Tab 能清楚分辨哪個視窗屬於哪個 ACC）
+    if acc_id is not None:
+        title_js = f"""
+        (function() {{
+            var prefix = '【ACC-{acc_id}】';
+            setInterval(function() {{
+                if (document.title && document.title.indexOf(prefix) !== 0) {{
+                    document.title = prefix + document.title;
+                }}
+            }}, 500);
+        }})();
+        """
+        try:
+            await tab.send(uc.cdp.page.add_script_to_evaluate_on_new_document(source=title_js))
+            await tab.evaluate(title_js)
+        except Exception as e:
+            print(f"⚠️ 標題注入失敗: {e}")
 
     print("\n🤖 拓元模式已接管... (關閉視窗可結束)")
     print("🛡️ CDP 全域監聽器運作中，自動防禦彈窗。")

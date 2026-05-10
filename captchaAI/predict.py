@@ -1,8 +1,11 @@
 import ddddocr
 import base64
+import io
 import time
 from typing import Optional
-from config import Selector
+from PIL import Image
+# 拓元驗證碼圖片 DOM ID
+CAPTCHA_IMAGE_ID = "TicketForm_verifyCode-image"
 
 # 1. 初始化 ddddocr
 # Maxbot 設定：show_ad=False, beta=True (這是關鍵)
@@ -25,10 +28,25 @@ def recognize_captcha(image_bytes: bytes) -> str:
         print(f"❌ 辨識錯誤: {e}")
         return ""
 
+
+def warmup_ocr() -> None:
+    """丟一張假圖跑一次 OCR，攤掉首次推論的 lazy init / JIT。"""
+    if OCR_SOLVER is None:
+        return
+    try:
+        t0 = time.perf_counter()
+        img = Image.new("RGB", (96, 40), color=(255, 255, 255))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        OCR_SOLVER.classification(buf.getvalue())
+        print(f"✔ OCR 引擎已暖機 ({(time.perf_counter()-t0)*1000:.0f}ms)")
+    except Exception as e:
+        print(f"⚠️ OCR 暖機失敗（不致命）: {e}")
+
 # 3. 取圖函式 (簡化版 JS)
 # 參考 Maxbot 的 canvas 邏輯，不強制填白底，保留原始透明度(如果有的話)
 async def get_captcha_base64_nodriver(tab) -> Optional[bytes]:
-    captcha_id = Selector.CAPTCHA_IMAGE[1] 
+    captcha_id = CAPTCHA_IMAGE_ID
     
     # Maxbot 風格的 JS：簡單直接，只負責抓圖
     js_script = f"""

@@ -1,0 +1,21 @@
+# 搶票機器人套件清單
+# Python 3.10 ~ 3.12（curl_cffi 尚未支援 3.13）
+
+# Web GUI（網頁版 War-Room）
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# Tixcraft API 模式
+curl_cffi>=0.7
+selenium>=4.18
+
+# 瀏覽器模式（Tixcraft / KKTIX / TicketPlus）
+nodriver>=0.40
+
+# 驗證碼辨識
+ddddocr>=1.5
+Pillow>=10.0
+
+# 對時 + HTTP
+requests>=2.31
+ntplib>=0.4
