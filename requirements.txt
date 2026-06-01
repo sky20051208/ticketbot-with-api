@@ -12,8 +12,9 @@ selenium>=4.18
 # 瀏覽器模式（Tixcraft / KKTIX / TicketPlus）
 nodriver>=0.40
 
-# 驗證碼辨識
-ddddocr>=1.5
+# 驗證碼辨識（自訓 CRNN+CTC ONNX，~99% acc）
+onnxruntime>=1.16
+numpy>=1.24
 Pillow>=10.0
 
 # 對時 + HTTP
