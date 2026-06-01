@@ -1,11 +1,12 @@
 """拓元 API 模式 entry point — `python -m tixcraftapi --config <path>` 啟動。
 
-本檔只負責三件事：
+本檔只負責：
   - argparse + load_config_override (GUI 用 --config 蓋值)
   - log monkey-patch (所有 [XXX] print 加 ms 時間戳)
-  - main() 主流程串接 (cookie → 暖機 → 定時 → 重試迴圈 → 搶到後接管)
+  - main() 主流程：cookie → 暖機 → 定時 → FSM run → 搶到後接管
 
-搶票步驟在同套件的其他檔：session / parsing / game / verify / area / captcha / submit / order / finalize。
+實際搶票邏輯走 FSM (tixcraftapi.runner)；URL classify + state transition 在 state.py。
+搶票各步驟模組：session / parsing / game / verify / area / captcha / submit / order / finalize。
 """
 import sys
 import time
@@ -23,10 +24,9 @@ from timeWatcher import TimeWatcher
 
 from tixcraftapi import BASE
 from tixcraftapi.session import build_session, build_headers, warmup_session, keep_alive_loop
-from tixcraftapi.game import select_game, poll_until_open
-from tixcraftapi.area import select_area
-from tixcraftapi.submit import submit_ticket
-from tixcraftapi.order import follow_order
+from tixcraftapi.game import poll_until_open
+from tixcraftapi.state import State
+from tixcraftapi.runner import Context, run
 from tixcraftapi.finalize import open_chrome_with_session
 
 
@@ -175,58 +175,31 @@ def main():
     else:
         print("[TIMER] 定時啟動已關閉，直接開搶")
 
-    # --- 主重試迴圈 ---
-    retry_cnt = 0
+    # --- 進 FSM ---
+    # 若 polling 階段已拿到 area_url，把它塞進 ctx 並從 AREA state 開始；否則從 GAME 開始
+    ctx = Context(session=session, slug=config.ACTIVITY_SLUG)
+    if first_area_url:
+        ctx.area_url = first_area_url
+        initial_state = State.AREA
+        print(f"[GAME] 沿用 polling 拿到的場次: {first_area_url}")
+    else:
+        initial_state = State.GAME
+
     grabbed = False
     try:
-        while True:
-            retry_cnt += 1
-            ts = time.strftime('%H:%M:%S')
-            print(f"\n[{ts}] === 第 {retry_cnt} 次嘗試 ===")
-
-            # Step 1: 選場次
-            headers = build_headers(referer=f"{BASE}/activity/detail/{config.ACTIVITY_SLUG}")
-            if first_area_url:
-                area_url = first_area_url
-                first_area_url = None
-                print(f"[GAME] 沿用 polling 拿到的場次: {area_url}")
+        result_url = run(ctx, initial=initial_state, max_iter=30)
+        if result_url:
+            print(f"[SUCCESS] 搶到了! {result_url}")
+            if login_driver is not None:
+                # userdata 模式：cookie 灌回原本登入用的瀏覽器
+                browser_login.inject_cookies_and_go(
+                    login_driver, session, result_url, acc_id=config.ACC_ID)
+                grabbed = True
             else:
-                area_url = select_game(session, config.ACTIVITY_SLUG, headers, config.DATE_KEYWORD)
-            if not area_url:
-                time.sleep(config.RETRY_INTERVAL)
-                continue
-
-            # Step 3: 選區域（Step 2 驗證頁在 select_area 內部自動處理）
-            headers = build_headers(referer=area_url)
-            ticket_url = select_area(session, area_url, headers, config.AREA_KEYWORD)
-            if not ticket_url:
-                time.sleep(config.RETRY_INTERVAL)
-                continue
-
-            # Step 4: 送出表單
-            headers = build_headers(referer=ticket_url)
-            redirect_url = submit_ticket(session, ticket_url, headers)
-            if redirect_url is None:
-                time.sleep(config.RETRY_INTERVAL)
-                continue
-
-            # Step 5: 跟隨 redirect 判定結果
-            result_url = follow_order(session, redirect_url, headers)
-            if result_url:
-                print(f"[SUCCESS] 搶到了! {result_url}")
-                if login_driver is not None:
-                    # userdata 模式：cookie 灌回原本登入用的瀏覽器
-                    browser_login.inject_cookies_and_go(
-                        login_driver, session, result_url, acc_id=config.ACC_ID)
-                    grabbed = True
-                else:
-                    # string 模式：開新的乾淨 Chrome 注入 session
-                    open_chrome_with_session(session, result_url)
-                break
-            else:
-                print("[FAIL] 未成功，重試")
-
-            time.sleep(config.RETRY_INTERVAL)
+                # string 模式：開新的乾淨 Chrome 注入 session
+                open_chrome_with_session(session, result_url)
+        else:
+            print("[FAIL] FSM 結束未搶到")
 
     except KeyboardInterrupt:
         print("\n[EXIT] 手動中斷")
