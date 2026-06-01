@@ -4,6 +4,8 @@ const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 const PLATFORMS  = ["TIXCRAFT", "KKTIX", "TICKETPLUS"];
 const AREA_MODES = ["關鍵字優先", "由上而下", "由下而上", "隨機"];
 const RUN_MODES  = ["API模式", "瀏覽器模式"];
+const MANUAL_COOKIE = "(手貼COOKIE)";
+let CHROME_PROFILES = [MANUAL_COOKIE];  // 由 /api/chrome_profiles 填，INIT/refresh 時更新
 
 const sockets   = new Map();  // id -> WebSocket
 const cardLogs  = new Map();  // id -> string[]
@@ -58,6 +60,11 @@ async function api(method, path, body) {
 
 async function refresh() {
   const items = await api("GET", "/api/instances");
+  try {
+    CHROME_PROFILES = await api("GET", "/api/chrome_profiles");
+  } catch (_) {
+    CHROME_PROFILES = [MANUAL_COOKIE];  // server 還沒重啟也讓 grid 照常 render
+  }
   renderGrid(items);
 }
 
@@ -103,7 +110,21 @@ function renderCard(item) {
   bindText  (card, ".f-watchurl", cfg.TIME_WATCH_URL);
   bindCheck (card, ".f-timer",    cfg.ENABLE_TIME_WATCHER);
   bindCheck (card, ".f-proxy",    cfg.ENABLE_PROXY_POOL);
+  bindSelect(card, ".f-profile",  CHROME_PROFILES, cfg.chrome_profile || MANUAL_COOKIE);
   bindText  (card, ".f-cookie",   cfg.COOKIE);
+
+  // 欄位連動鎖定：
+  //   選了 chrome profile（非「手貼COOKIE」）→ 鎖 COOKIE 輸入
+  //   AREA MODE 非「關鍵字優先」→ 鎖 AREA KEYWORD 輸入
+  const applyLocks = () => {
+    const usingProfile = card.querySelector(".f-profile").value !== MANUAL_COOKIE;
+    card.querySelector(".f-cookie").disabled = usingProfile;
+    const byKeyword = card.querySelector(".f-areamode").value === "關鍵字優先";
+    card.querySelector(".f-area").disabled = !byKeyword;
+  };
+  card.querySelector(".f-profile").addEventListener("change", applyLocks);
+  card.querySelector(".f-areamode").addEventListener("change", applyLocks);
+  applyLocks();
 
   // 還原 log
   const buf = cardLogs.get(item.id);
@@ -134,6 +155,7 @@ function scheduleSave(card) {
 function readCardConfig(card) {
   return {
     run_mode:                card.querySelector(".f-runmode").value,
+    chrome_profile:          card.querySelector(".f-profile").value,
     PLATFORM:                card.querySelector(".f-platform").value,
     ACTIVITY_SLUG:           card.querySelector(".f-slug").value,
     TARGET_START_TIME:       card.querySelector(".f-time").value,

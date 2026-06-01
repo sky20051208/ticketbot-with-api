@@ -53,7 +53,7 @@ def acquire() -> str:
             return proxy_url
         print(f"[PROXY] 第 {i}/{MAX_VALIDATE_TRIES} 次驗證失敗，重試中...")
 
-    print("[PROXY] CliProxy 連不上（用了 us2 美國 gateway，建議改用亞洲節點）")
+    print("[PROXY] CliProxy 連不上")
     config.CURRENT_PROXY = ""
     return ""
 

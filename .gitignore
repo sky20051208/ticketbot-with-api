@@ -12,15 +12,11 @@ env/
 .mypy_cache/
 .ruff_cache/
 
-# .NET / WPF (gui/)
-[Bb]in/
-[Oo]bj/
-*.user
-*.suo
-.vs/
-
 # Per-instance Chrome user-data + 帶 cookie 的 config
 profiles/
+
+# 帳號專用 Chrome profile（含登入態 cookie）
+chrome_profiles/
 
 # IDE
 .vscode/
@@ -40,3 +36,13 @@ Desktop.ini
 
 # Log
 *.log
+
+# captchaAI 訓練暫存（dataset_synth 數百 MB；_train_ckpt 個人重訓才需要；其他 debug 用）
+captchaAI/dataset_synth/
+captchaAI/_synth_preview/
+captchaAI/_*.png
+captchaAI/_train_ckpt.pt
+captchaAI/_label_progress.json
+
+# VSCode 暫存
+tempCodeRunnerFile.py

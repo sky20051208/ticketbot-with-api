@@ -197,7 +197,11 @@ input.cookie { font-size: 11px; }
 }
 .field.f-narrow { /* default */ }
 .field.f-wide { grid-column: span 2; }
+.field.f-span3 { grid-column: span 3; }
 .field.f-full { grid-column: 1 / -1; }
+
+/* 連動鎖定的欄位（profile 選帳號時鎖 cookie、areamode 非關鍵字時鎖 keyword） */
+.fld:disabled { opacity: 0.4; cursor: not-allowed; }
 .flags { justify-content: flex-end; gap: 2px; }
 .check {
   display: flex; align-items: center; gap: 6px;

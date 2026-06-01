@@ -1,8 +1,8 @@
 """本機 War-Room 網頁版後端。
 
-對應 gui/MainWindow.xaml.cs 的功能：
+功能：
 - 管理多個 instance（profiles/acc_{id}/）
-- spawn test.py（API 模式）/ main.py（瀏覽器模式）子進程
+- spawn `python -m tixcraftapi`（API 模式）/ main.py（瀏覽器模式）子進程
 - 透過 pause.lock 暫停/繼續
 - WebSocket 推 stdout 即時 log
 """
@@ -25,8 +25,11 @@ from pydantic import BaseModel
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 PROFILES_DIR = PROJECT_DIR / "profiles"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+CHROME_PROFILES_DIR = PROJECT_DIR / "chrome_profiles"
 
 DEFAULT_EXCLUDE = "輪椅;身障;身心;障礙;Restricted View;燈柱遮蔽;視線不完整;身障票"
+# chrome profile 下拉選單裡代表「不用 user-data-dir、用手貼 COOKIE」的選項
+MANUAL_COOKIE_OPTION = "(手貼COOKIE)"
 
 
 class InstanceConfig(BaseModel):
@@ -43,7 +46,8 @@ class InstanceConfig(BaseModel):
     ENABLE_TIME_WATCHER: bool = True
     TIME_WATCH_URL: str = ""
     ENABLE_PROXY_POOL: bool = False
-    run_mode: str = "API模式"  # 純前端用，決定 spawn test.py 還是 main.py
+    run_mode: str = "API模式"  # 純前端用，決定 spawn `python -m tixcraftapi` 還是 main.py
+    chrome_profile: str = MANUAL_COOKIE_OPTION  # 純前端用，選的 chrome profile 名
 
 
 class InstanceState:
@@ -87,6 +91,13 @@ def load_config(id: int) -> InstanceConfig:
 def save_config(id: int, cfg: InstanceConfig, tile: dict):
     profile_dir(id).mkdir(parents=True, exist_ok=True)
     out = cfg.model_dump()
+    # chrome_profile（前端選的）→ 轉成 Python 端用的 COOKIE_SOURCE / CHROME_USER_DATA_DIR
+    prof = cfg.chrome_profile
+    use_userdata = bool(prof) and prof != MANUAL_COOKIE_OPTION
+    out["COOKIE_SOURCE"] = "userdata" if use_userdata else "string"
+    out["CHROME_USER_DATA_DIR"] = (
+        str(CHROME_PROFILES_DIR / prof) if use_userdata else ""
+    )
     out.update({
         "ACC_ID": id,
         "WINDOW_X": tile["x"],
@@ -194,6 +205,17 @@ async def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/api/chrome_profiles")
+async def list_chrome_profiles():
+    """掃 chrome_profiles/ 底下的資料夾，回下拉選單清單（含「(手貼COOKIE)」）。"""
+    result = [MANUAL_COOKIE_OPTION]
+    if CHROME_PROFILES_DIR.exists():
+        for d in sorted(CHROME_PROFILES_DIR.iterdir()):
+            if d.is_dir():
+                result.append(d.name)
+    return result
+
+
 @app.get("/api/instances")
 async def list_instances():
     return [
@@ -256,13 +278,17 @@ async def _start_one(id: int, req: StartReq) -> dict:
     save_config(id, inst.config, tile)
 
     is_api = inst.config.run_mode == "API模式"
-    script = "test.py" if is_api else "main.py"
-    args = [
-        sys.executable, "-u", str(PROJECT_DIR / script),
-        "--config", str(config_path(id)),
-    ]
-    if not is_api:
-        args.extend(["--acc", str(id)])
+    if is_api:
+        args = [
+            sys.executable, "-u", "-m", "tixcraftapi",
+            "--config", str(config_path(id)),
+        ]
+    else:
+        args = [
+            sys.executable, "-u", str(PROJECT_DIR / "main.py"),
+            "--config", str(config_path(id)),
+            "--acc", str(id),
+        ]
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
