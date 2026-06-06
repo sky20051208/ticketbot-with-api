@@ -173,8 +173,8 @@ class TimeWatcher:
             current_tw_time = datetime.fromtimestamp(now) + self.time_offset
             remaining = (self.target_time - current_tw_time).total_seconds()
             
-            # 觸發點：提早 0.7 秒回傳，給 polling 緩衝抓開賣瞬間
-            if remaining <= 0.7:
+            # 觸發點：提早 0.9 秒回傳，給 polling 緩衝抓開賣瞬間
+            if remaining <= 0.9:
                 print("\n⚡⚡⚡ 時間到！啟動瀏覽器搶票！ ⚡⚡⚡")
                 return True
             

@@ -48,27 +48,46 @@ def parse_proxy_url(url: str) -> dict:
     }
 
 
-def apply_proxy_to_options(opts: Options, _unused_dir: str, proxy_url: str) -> bool:
-    """把 proxy 設定塞進 Chrome Options（透過 localhost bridge 處理 auth）。
-    回傳 True 表示真的套用了 proxy；False 表示 proxy_url 空或解析失敗。
-    第二個參數保留是為了相容介面（bridge 不需要 fs 路徑）。"""
+def apply_stealth_to_options(opts: Options) -> None:
+    """拔掉 Selenium 的自動化標記。
+    主要解決兩件事：
+      1. Chrome 頂部黃條「Chrome 正在受自動測試軟體控制」消失
+      2. JS 端 `navigator.webdriver` 不再回 true（一些網站用這個擋 bot）
+    純化 UI 體驗 + 對抗最基本的 anti-bot 偵測。不影響 cookie / session / proxy 行為。"""
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+
+
+def setup_proxy_bridge(proxy_url: str) -> int | None:
+    """啟動 localhost bridge 處理 proxy auth；回傳 local port，沒 proxy / 解析失敗回 None。
+    bridge 物件存進 _active_bridges 防 GC，跟 Python process 共生死。
+    Selenium / subprocess 兩種開 Chrome 的方式都可以共用這個 helper 拿 local port。"""
     if not proxy_url:
-        return False
+        return None
     p = parse_proxy_url(proxy_url)
     if not (p["host"] and p["port"]):
         print(f"[PROXY-CHROME] URL 解析失敗: {proxy_url} — Chrome 改走直連")
-        return False
+        return None
 
     # 起 localhost bridge 自動塞 auth header（Chrome 那端不用處理認證）
     bridge = LocalProxyBridge(p["host"], p["port"], p["user"] or "", p["password"] or "")
     local_port = bridge.start()
     _active_bridges.append(bridge)
+    print(f"[PROXY-CHROME] 127.0.0.1:{local_port} → {p['host']}:{p['port']} (bridge, auth={'on' if p['user'] else 'off'})")
+    return local_port
 
+
+def apply_proxy_to_options(opts: Options, _unused_dir: str, proxy_url: str) -> bool:
+    """把 proxy 設定塞進 Chrome Options（透過 localhost bridge 處理 auth）。
+    回傳 True 表示真的套用了 proxy；False 表示 proxy_url 空或解析失敗。
+    第二個參數保留是為了相容介面（bridge 不需要 fs 路徑）。"""
+    local_port = setup_proxy_bridge(proxy_url)
+    if local_port is None:
+        return False
     opts.add_argument(f"--proxy-server=http://127.0.0.1:{local_port}")
     # WebRTC 預設會繞過 proxy 用本機 IP 探測 → 鎖死只允許 proxied UDP
     opts.add_argument("--webrtc-ip-handling-policy=disable_non_proxied_udp")
-
-    print(f"[PROXY-CHROME] 127.0.0.1:{local_port} → {p['host']}:{p['port']} (bridge, auth={'on' if p['user'] else 'off'})")
     return True
 
 
@@ -94,6 +113,7 @@ def launch_browser(user_data_dir: str, window_w: int = -1, window_h: int = -1,
     if window_x >= 0 and window_y >= 0:
         opts.add_argument(f"--window-position={window_x},{window_y}")
 
+    apply_stealth_to_options(opts)
     apply_proxy_to_options(opts, user_data_dir, proxy_url)
 
     driver = webdriver.Chrome(options=opts)
@@ -101,10 +121,41 @@ def launch_browser(user_data_dir: str, window_w: int = -1, window_h: int = -1,
     return driver
 
 
-def wait_for_login(driver, timeout: int = 600) -> bool:
-    """跳到 /login 頁，每次都走一遍登入流程；輪詢直到 URL 回到 tixcraft 主站。
+def _verify_tixcraft_logged_in(driver) -> bool:
+    """JS 檢查目前頁面是否處於已登入狀態。
 
-    判定「登入完成」= URL 的 **hostname 屬於 tixcraft.com** 且 **path 不在 /login**。
+    找這幾種 auth-required 元素任何一個 → 已登入：
+      - `a[href*="logout"]`：登出連結（最可靠）
+      - `a[href*="/user/info"]` / `a[href*="/user/order"]`：會員專區連結
+      - `a[href*="/member"]`：會員中心
+    livenation 模式下使用者點按鈕跳到 tixcraft `/activity/detail/`，URL 條件符合但
+    其實還是訪客，靠這個 DOM 檢查擋下誤判。"""
+    try:
+        result = driver.execute_script("""
+            return !!(
+                document.querySelector('a[href*="logout"]') ||
+                document.querySelector('a[href*="/user/info"]') ||
+                document.querySelector('a[href*="/user/order"]') ||
+                document.querySelector('a[href*="/member"]')
+            );
+        """)
+        return bool(result)
+    except Exception:
+        return False
+
+
+def wait_for_login(driver, timeout: int = 600, start_url: str = "") -> bool:
+    """跳到登入起始頁，每次都走一遍登入流程；輪詢直到 URL 回到 tixcraft 主站。
+
+    start_url:
+      - 空字串：跳到 tixcraft.com/login（預設行為）
+      - 非空：跳到指定 URL（livenation 模式：起始 livenation 活動頁，
+              使用者在 livenation 登入後點按鈕跳到 tixcraft，繼續完成 tixcraft 登入）
+
+    判定「登入完成」雙條件：
+      (1) URL hostname 屬於 tixcraft.com 且 path 不在 /login
+      (2) DOM 找得到 logout 連結（或其他 auth-only 連結）
+
     必須用 urlparse 比對 hostname/path，**不能直接 substring 比 URL 整串** —
     FB OAuth 的 consent URL 會把 `tixcraft.com/login/facebook` 塞進 query param
     當 callback URL，substring 比對會被騙。
@@ -113,14 +164,49 @@ def wait_for_login(driver, timeout: int = 600) -> bool:
     等使用者按「以某某身分繼續」之類授權，授權完成 OAuth callback 一定會繞回
     tixcraft.com/login/{provider}?code=...，server 處理完再 redirect 到 /user/info
     或 / 等非 /login 頁，那時才算完成。
+
+    livenation 模式特別需要條件 (2)：使用者從 livenation 點過來會直接落在
+    `/activity/detail/`，URL 條件馬上符合但 tixcraft session 還是訪客，DOM 沒有
+    logout 連結，會繼續等到使用者實際登入完成（通常會被 tixcraft 引導到 /login）。
     """
-    print(f"[LOGIN] 開啟登入頁，請在 Chrome 視窗完成登入（最多 {timeout}s）...")
-    driver.get(f"{BASE}/login")
+    target = start_url or f"{BASE}/login"
+    if start_url:
+        print(f"[LOGIN] (livenation 模式) 開啟起始頁: {target}")
+        print(f"[LOGIN] 請在 livenation 登入後點「藝人官方預售」按鈕導向 tixcraft，並完成 tixcraft 登入（最多 {timeout}s）...")
+    else:
+        print(f"[LOGIN] 開啟登入頁，請在 Chrome 視窗完成登入（最多 {timeout}s）...")
+    driver.get(target)
     time.sleep(1.0)
 
     deadline = time.monotonic() + timeout
     last_url = ""
+    locked_handle: str | None = None  # 一旦切到 tixcraft 分頁就鎖定，後續不再亂跳
     while time.monotonic() < deadline:
+        # livenation 的「立即購票」是 target="_blank"，點下去 tixcraft 會開在新分頁。
+        # 所以每輪都掃所有 window_handles，找到第一個 host 在 tixcraft 域的分頁就切過去。
+        # 鎖定後就不再切換（避免使用者開其他 tixcraft tab 干擾）。
+        if locked_handle is None:
+            try:
+                handles = driver.window_handles
+            except Exception:
+                print("[LOGIN] driver 異常（視窗被關閉？）")
+                return False
+            for h in handles:
+                try:
+                    driver.switch_to.window(h)
+                    cur_h = driver.current_url or ""
+                except Exception:
+                    continue
+                host_h = (urlparse(cur_h).hostname or "").lower()
+                if host_h == "tixcraft.com" or host_h.endswith(".tixcraft.com"):
+                    if h != handles[0] or len(handles) > 1:
+                        print(f"[LOGIN] 偵測到 tixcraft 分頁，切換 focus: {cur_h}")
+                    locked_handle = h
+                    break
+            else:
+                # 所有 tab 都還沒到 tixcraft，留在最後一個 tab，繼續等
+                pass
+
         try:
             cur = driver.current_url or ""
         except Exception:
@@ -130,13 +216,20 @@ def wait_for_login(driver, timeout: int = 600) -> bool:
         parsed = urlparse(cur)
         host = (parsed.hostname or "").lower()
         path = parsed.path or ""
-        # hostname 屬於 tixcraft.com（含 www.tixcraft.com）且 path 不在 /login
-        if (host == "tixcraft.com" or host.endswith(".tixcraft.com")) and "/login" not in path:
+        on_tixcraft = host == "tixcraft.com" or host.endswith(".tixcraft.com")
+        off_login_path = "/login" not in path
+
+        # 雙條件：URL 在 tixcraft 且不在 /login，再加 DOM 確認已登入
+        if on_tixcraft and off_login_path and _verify_tixcraft_logged_in(driver):
             print(f"[LOGIN] 登入完成: {cur}")
             return True
 
         if cur != last_url:
-            print(f"[LOGIN] 等待中... 目前: {cur}")
+            hint = ""
+            if on_tixcraft and off_login_path:
+                # livenation 模式下會落在這狀態：URL 已到 tixcraft 但還沒登入
+                hint = "  ← URL 已到 tixcraft 但尚未登入，請在頁面右上角登入"
+            print(f"[LOGIN] 等待中... 目前: {cur}{hint}")
             last_url = cur
         time.sleep(1.0)
 

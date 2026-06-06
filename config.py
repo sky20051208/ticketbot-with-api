@@ -24,6 +24,12 @@ EXCLUDE_AREA_KEYWORD = "輪椅;身障;身心;障礙;Restricted View;燈柱遮蔽
 DATE_KEYWORD = ""               # 場次日期篩選（空字串 = 選第一場）
 PRESALE_CODE = ""               # 會員碼 / presale code（空字串 = 不使用，頁面有答案會自動抓）
 
+# livenation 模式（搭配 COOKIE_SOURCE="userdata"）：browser 從這個 URL 開始而非 /login。
+# 例 "https://www.livenation.com.tw/event/xxxx/"。使用者在 livenation 登入 + 點按鈕跳到
+# tixcraft，bot 偵測 URL 進到 tixcraft 域就抓 cookie。session 帶著真實 livenation referer
+# 歷史，比手動補 Referer header 更穩。空字串 = 走 default /login 流程。
+LIVENATION_START_URL = ""
+
 # --- 時間與監控 ---
 ENABLE_TIME_WATCHER = False      # 是否啟用定時等待
 TARGET_START_TIME = "12:00:00"  # 目標開賣時間 HH:MM:SS
@@ -45,12 +51,12 @@ ORDER_POLL_INTERVAL = 5.0       # 排隊輪詢間隔（秒）— 進 order 後�
 ORDER_POLL_MAX = 180            # 排隊輪詢最大次數（5s × 180 = 15 分鐘上限）
 
 # --- Proxy Pool (CliProxy 住宅 IP) ---
-ENABLE_PROXY_POOL = False                        # 是否啟用 CliProxy（每個 instance 獨立 IP）
+ENABLE_PROXY_POOL = True                       # 是否啟用 CliProxy（每個 instance 獨立 IP）
 CLIPROXY_HOST = "sg2.cliproxy.io"  # 新加坡節點，台灣 RTT ~25ms（us2 美國要 135ms+）
 CLIPROXY_PORT = 3010
 # {acc_id} 會被 ACC_ID 替換 → 每個 instance 不同 sid → 不同出口 IP
-# t-5 是 sticky session 5 分鐘；要更長就改 t-30 / t-60（看 CliProxy 方案是否支援）
-CLIPROXY_USERNAME_TEMPLATE = "av5z1178126-region-TW-sid-acc{acc_id}-t-5"
+# t-90 = sticky session 90 分鐘（建 profile / 等開賣 / 搶票全在窗口內 IP 一致）
+CLIPROXY_USERNAME_TEMPLATE = "av5z1178126-region-TW-sid-acc{acc_id}-t-90"
 CLIPROXY_PASSWORD = "r3jalstu"
 CURRENT_PROXY = ""                               # 執行期由 proxy_pool.acquire() 寫入
 

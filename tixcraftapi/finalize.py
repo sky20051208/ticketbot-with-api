@@ -33,6 +33,7 @@ def open_chrome_with_session(session, target_url: str):
         opts.add_argument(f"--window-position={config.WINDOW_X},{config.WINDOW_Y}")
 
     # proxy 透過 localhost bridge 處理 auth，不會 load extension，所以可以安全 --disable-extensions
+    browser_login.apply_stealth_to_options(opts)
     browser_login.apply_proxy_to_options(opts, tmp_dir, config.CURRENT_PROXY)
 
     driver = webdriver.Chrome(options=opts)

@@ -8,7 +8,7 @@ import time
 from curl_cffi import requests as cf_requests
 
 import config
-from tixcraftapi import BASE
+from tixcraftapi import BASE, alerts
 
 
 def follow_order(session: cf_requests.Session, redirect_url: str,
@@ -28,6 +28,9 @@ def follow_order(session: cf_requests.Session, redirect_url: str,
     status = resp.status_code
 
     print(f"[ORDER] 最終 URL: {final_url} (HTTP {status})")
+    if status == 403:
+        alerts.play_403("ORDER")
+        raise alerts.Blocked403("ORDER")
 
     if "checkout" in final_url:
         print("[ORDER] 已到結帳頁!")

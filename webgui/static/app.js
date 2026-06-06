@@ -5,7 +5,11 @@ const PLATFORMS  = ["TIXCRAFT", "KKTIX", "TICKETPLUS"];
 const AREA_MODES = ["關鍵字優先", "由上而下", "由下而上", "隨機"];
 const RUN_MODES  = ["API模式", "瀏覽器模式"];
 const MANUAL_COOKIE = "(手貼COOKIE)";
-let CHROME_PROFILES = [MANUAL_COOKIE];  // 由 /api/chrome_profiles 填，INIT/refresh 時更新
+let CHROME_PROFILES_BY_PLATFORM = {};  // {平台: [profile名...]}，由 /api/chrome_profiles 填
+function profilesFor(platform) {
+  const list = CHROME_PROFILES_BY_PLATFORM[platform];
+  return (list && list.length) ? list : [MANUAL_COOKIE];
+}
 
 const sockets   = new Map();  // id -> WebSocket
 const cardLogs  = new Map();  // id -> string[]
@@ -61,9 +65,13 @@ async function api(method, path, body) {
 async function refresh() {
   const items = await api("GET", "/api/instances");
   try {
-    CHROME_PROFILES = await api("GET", "/api/chrome_profiles");
+    const entries = await Promise.all(
+      PLATFORMS.map(p =>
+        api("GET", `/api/chrome_profiles?platform=${encodeURIComponent(p)}`)
+          .then(list => [p, list])));
+    CHROME_PROFILES_BY_PLATFORM = Object.fromEntries(entries);
   } catch (_) {
-    CHROME_PROFILES = [MANUAL_COOKIE];  // server 還沒重啟也讓 grid 照常 render
+    CHROME_PROFILES_BY_PLATFORM = {};  // server 還沒重啟也讓 grid 照常 render
   }
   renderGrid(items);
 }
@@ -107,11 +115,39 @@ function renderCard(item) {
   bindText  (card, ".f-exclude",  cfg.EXCLUDE_AREA_KEYWORD);
   bindText  (card, ".f-date",     cfg.DATE_KEYWORD);
   bindText  (card, ".f-presale",  cfg.PRESALE_CODE);
+  bindText  (card, ".f-livenationstart", cfg.LIVENATION_START_URL);
   bindText  (card, ".f-watchurl", cfg.TIME_WATCH_URL);
   bindCheck (card, ".f-timer",    cfg.ENABLE_TIME_WATCHER);
   bindCheck (card, ".f-proxy",    cfg.ENABLE_PROXY_POOL);
-  bindSelect(card, ".f-profile",  CHROME_PROFILES, cfg.chrome_profile || MANUAL_COOKIE);
   bindText  (card, ".f-cookie",   cfg.COOKIE);
+
+  // 每平台各記一個 chrome profile：下拉只列「當前平台」的 profile，切 PLATFORM 時自動重列+套用
+  card._profileMap = Object.assign({}, cfg.chrome_profile_map || {});
+  const _platSel = card.querySelector(".f-platform");
+  const _profSel = card.querySelector(".f-profile");
+  const fillProfiles = (platform, wanted) => {
+    const opts = profilesFor(platform);
+    _profSel.innerHTML = "";
+    for (const o of opts) {
+      const e = document.createElement("option");
+      e.value = o; e.textContent = o; _profSel.appendChild(e);
+    }
+    _profSel.value = opts.includes(wanted) ? wanted : MANUAL_COOKIE;
+  };
+  fillProfiles(_platSel.value, card._profileMap[_platSel.value] || cfg.chrome_profile || MANUAL_COOKIE);
+  card._profileMap[_platSel.value] = _profSel.value;
+  let _prevPlat = _platSel.value;
+  _platSel.addEventListener("change", () => {
+    card._profileMap[_prevPlat] = _profSel.value;                                   // 存舊平台
+    fillProfiles(_platSel.value, card._profileMap[_platSel.value] || MANUAL_COOKIE); // 重列+套用新平台
+    card._profileMap[_platSel.value] = _profSel.value;
+    _prevPlat = _platSel.value;
+    applyLocks();
+  });
+  _profSel.addEventListener("change", () => {
+    card._profileMap[_platSel.value] = _profSel.value;
+    scheduleSave(card);
+  });
 
   // 欄位連動鎖定：
   //   選了 chrome profile（非「手貼COOKIE」）→ 鎖 COOKIE 輸入
@@ -153,10 +189,17 @@ function scheduleSave(card) {
 }
 
 function readCardConfig(card) {
+  // 把當前平台的 profile 寫回 map，並以它當作要送出的 chrome_profile（當前生效的）
+  const _platform = card.querySelector(".f-platform").value;
+  const _prof     = card.querySelector(".f-profile").value;
+  const _map      = Object.assign({}, card._profileMap || {});
+  _map[_platform] = _prof;
+  card._profileMap = _map;
   return {
     run_mode:                card.querySelector(".f-runmode").value,
-    chrome_profile:          card.querySelector(".f-profile").value,
-    PLATFORM:                card.querySelector(".f-platform").value,
+    chrome_profile:          _prof,
+    chrome_profile_map:      _map,
+    PLATFORM:                _platform,
     ACTIVITY_SLUG:           card.querySelector(".f-slug").value,
     TARGET_START_TIME:       card.querySelector(".f-time").value,
     TICKET_AMOUNT:           card.querySelector(".f-qty").value,
@@ -165,6 +208,7 @@ function readCardConfig(card) {
     EXCLUDE_AREA_KEYWORD:    card.querySelector(".f-exclude").value,
     DATE_KEYWORD:            card.querySelector(".f-date").value,
     PRESALE_CODE:            card.querySelector(".f-presale").value,
+    LIVENATION_START_URL:    card.querySelector(".f-livenationstart").value,
     TIME_WATCH_URL:          card.querySelector(".f-watchurl").value,
     ENABLE_TIME_WATCHER:     card.querySelector(".f-timer").checked,
     ENABLE_PROXY_POOL:       card.querySelector(".f-proxy").checked,

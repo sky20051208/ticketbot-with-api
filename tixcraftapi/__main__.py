@@ -125,7 +125,7 @@ def main():
             window_x=config.WINDOW_X, window_y=config.WINDOW_Y,
             proxy_url=config.CURRENT_PROXY,  # "" 時 Chrome 直連，不影響本機網路
         )
-        if not browser_login.wait_for_login(login_driver):
+        if not browser_login.wait_for_login(login_driver, start_url=config.LIVENATION_START_URL):
             print("[ERROR] 登入未完成或超時")
             login_driver.quit()
             return
@@ -187,7 +187,7 @@ def main():
 
     grabbed = False
     try:
-        result_url = run(ctx, initial=initial_state, max_iter=30)
+        result_url = run(ctx, initial=initial_state, max_iter=None)
         if result_url:
             print(f"[SUCCESS] 搶到了! {result_url}")
             if login_driver is not None:

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from curl_cffi import requests as cf_requests
 
 import config
-from tixcraftapi import BASE
+from tixcraftapi import BASE, alerts
 from tixcraftapi.captcha import fetch_captcha_image, solve_captcha
 from tixcraftapi.parsing import parse_ticket_form, find_ticket_codes
 from captchaAI.predict import recognize_captcha
@@ -68,6 +68,9 @@ def submit_ticket(session: cf_requests.Session,
 
             if res.status_code != 200:
                 print(f"[TICKET] GET 失敗 HTTP {res.status_code}")
+                if res.status_code == 403:
+                    alerts.play_403("TICKET GET")
+                    raise alerts.Blocked403("TICKET GET")
                 return None
 
             t_parse = time.perf_counter()
@@ -110,6 +113,10 @@ def submit_ticket(session: cf_requests.Session,
         status = post_res.status_code
         loc = post_res.headers.get("Location", "")
         print(f"[TICKET] 第{round_n}輪 POST: {status} -> {loc}")
+
+        if status == 403:
+            alerts.play_403("TICKET POST")
+            raise alerts.Blocked403("TICKET POST")
 
         # 302/301 = 成功（不管導去哪，交給主程式判斷）
         if status in (301, 302) and loc:

@@ -5,7 +5,7 @@ import re
 from curl_cffi import requests as cf_requests
 
 import config
-from tixcraftapi import BASE
+from tixcraftapi import BASE, alerts
 
 
 def handle_verify(session: cf_requests.Session, verify_url: str,
@@ -14,6 +14,9 @@ def handle_verify(session: cf_requests.Session, verify_url: str,
     res = session.get(verify_url, headers=headers)
     if res.status_code != 200:
         print(f"[VERIFY] GET 失敗 HTTP {res.status_code}")
+        if res.status_code == 403:
+            alerts.play_403("VERIFY")
+            raise alerts.Blocked403("VERIFY")
         return False
 
     html = res.text

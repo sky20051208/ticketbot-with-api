@@ -1,4 +1,5 @@
 """curl_cffi session 建立 + 共用 header + 暖機/keep-alive。"""
+import re
 import threading
 
 from curl_cffi import requests as cf_requests
@@ -6,6 +7,9 @@ from curl_cffi import requests as cf_requests
 import config
 import proxy_pool
 from tixcraftapi import BASE
+
+# /game/ 頁出現場次按鈕的特徵（用於 keep_alive_loop 偵測「提前開賣」）
+_GAME_BTN_RE = re.compile(r'data-href=["\'][^"\']*?/ticket/area/')
 
 
 def build_session(cookie_str: str) -> cf_requests.Session:
@@ -51,13 +55,25 @@ def warmup_session(session: cf_requests.Session, slug: str = ""):
 
 def keep_alive_loop(session: cf_requests.Session, stop_event: threading.Event,
                     slug: str = "", interval: float = 30.0):
-    """背景 thread：定期 ping /activity/game/{slug} 維持 TLS connection + 該 endpoint warm。
-    T-0 之前必須 stop_event.set() 停止，避免跟主流程搶 session。
-    用真正的 game endpoint，server 端 handler / cache 都會跟著 warm。"""
+    """背景 thread：定期 ping /activity/game/{slug} 維持 TLS connection + 該 endpoint warm，
+    順便看 /game/ HTML 狀態：
+      - 「即將開賣 / coming soon」→ 尚未開放
+      - 有場次按鈕 → !!! 提前開賣 !!!（log 大聲警告）
+      - 其他 → 內容狀態未知
+    T-0 之前必須 stop_event.set() 停止，避免跟主流程搶 session。"""
     target = f"{BASE}/activity/game/{slug}" if slug else f"{BASE}/"
     headers = build_headers()
     while not stop_event.wait(interval):
         try:
-            session.get(target, headers=headers, timeout=5)
+            res = session.get(target, headers=headers, timeout=5)
+            if not slug or res.status_code != 200:
+                continue
+            html = res.text
+            if "即將開賣" in html or "coming soon" in html.lower():
+                print("[WATCH] /game/ 尚未開放 (即將開賣)")
+            elif _GAME_BTN_RE.search(html):
+                print("[WATCH] !!! /game/ 已出現場次按鈕，疑似提前開賣 !!!")
+            else:
+                print(f"[WATCH] /game/ 200 OK ({len(res.content):,}B) 內容無場次")
         except Exception:
             pass

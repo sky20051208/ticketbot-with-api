@@ -38,10 +38,11 @@ FILES = [
 
 # 整個目錄打包（會自動排除 __pycache__）
 DIRS = [
-    "tixcraftapi",      # API 模式整套（含 state.py / runner.py FSM）
+    "tixcraftapi",      # API 模式整套（含 state.py / runner.py FSM / alerts.py）
     "kktix",
     "ticketplus",
     "webgui/static",
+    "sounds",           # 音效檔（朋友放自己的 403.wav / checkout.wav 進來）
 ]
 
 EXCLUDE_NAMES = {"__pycache__", ".pyc"}

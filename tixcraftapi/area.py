@@ -6,7 +6,7 @@ import re
 from curl_cffi import requests as cf_requests
 
 import config
-from tixcraftapi import BASE
+from tixcraftapi import BASE, alerts
 from tixcraftapi.captcha import CaptchaPrefetch
 from tixcraftapi.verify import handle_verify
 
@@ -24,7 +24,7 @@ def select_area(session: cf_requests.Session, area_url: str,
     session._captcha_prefetch = CaptchaPrefetch(session, captcha_headers)
 
     res = session.get(area_url, headers={**headers, "Referer": area_url},
-                      allow_redirects=False)
+                      allow_redirects=False, timeout=10)
 
     # 可能被 redirect 到驗證頁
     if res.status_code in (301, 302):
@@ -33,7 +33,7 @@ def select_area(session: cf_requests.Session, area_url: str,
         if "verify" in loc:
             print(f"[AREA] 被導向驗證頁: {full_loc}")
             if handle_verify(session, full_loc, headers):
-                res = session.get(area_url, headers={**headers, "Referer": full_loc})
+                res = session.get(area_url, headers={**headers, "Referer": full_loc}, timeout=10)
             else:
                 return None
         else:
@@ -42,6 +42,9 @@ def select_area(session: cf_requests.Session, area_url: str,
 
     if res.status_code != 200:
         print(f"[AREA] HTTP {res.status_code}")
+        if res.status_code == 403:
+            alerts.play_403("AREA")
+            raise alerts.Blocked403("AREA")
         return None
 
     html = res.text
@@ -104,12 +107,29 @@ def select_area(session: cf_requests.Session, area_url: str,
     print(f"[AREA] 策略: {strategy} | 關鍵字: {area_keyword}")
 
     if strategy == "關鍵字優先" and area_keyword:
-        filtered = [(aid, text, url) for aid, text, url in available
-                     if area_keyword in text]
-        if filtered:
-            selected = filtered[0]
-        else:
-            print(f"[AREA] 關鍵字 '{area_keyword}' 無匹配，fallback 選第一個")
+        # 關鍵字語法：
+        #   ;  分隔 = OR 優先順序（依序嘗試，第一個命中就用）
+        #   +  分隔 = AND 同時必須含（一個 keyword 內可以含多個子條件）
+        #
+        # 例 "G05+6980;G05" → 先找同時含 G05 跟 6980 的區，沒則 fallback G05 任意
+        keywords = [kw.strip() for kw in area_keyword.split(";") if kw.strip()]
+        selected = None
+        for idx, kw in enumerate(keywords):
+            sub_keywords = [s.strip() for s in kw.split("+") if s.strip()]
+            if not sub_keywords:
+                continue
+            filtered = [(aid, text, url) for aid, text, url in available
+                         if all(sk in text for sk in sub_keywords)]
+            if filtered:
+                selected = filtered[0]
+                kw_desc = " AND ".join(sub_keywords) if len(sub_keywords) > 1 else sub_keywords[0]
+                if len(keywords) > 1:
+                    print(f"[AREA] 關鍵字 '{kw_desc}' 命中（優先序 {idx + 1}/{len(keywords)}）")
+                elif len(sub_keywords) > 1:
+                    print(f"[AREA] 關鍵字 AND 條件 '{kw_desc}' 命中")
+                break
+        if selected is None:
+            print(f"[AREA] 關鍵字 {keywords} 全部無匹配，fallback 選第一個")
             selected = available[0]
     elif strategy == "由下而上":
         selected = available[-1]

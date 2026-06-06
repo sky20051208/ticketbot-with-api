@@ -3,7 +3,7 @@ import time
 
 from curl_cffi import requests as cf_requests
 
-from tixcraftapi import BASE
+from tixcraftapi import BASE, alerts
 from tixcraftapi.parsing import parse_game_area_url
 
 
@@ -17,6 +17,9 @@ def select_game(session: cf_requests.Session, slug: str,
 
     if res.status_code != 200:
         print(f"[GAME] HTTP {res.status_code}")
+        if res.status_code == 403:
+            alerts.play_403("GAME")
+            raise alerts.Blocked403("GAME")
         return None
 
     html = res.text

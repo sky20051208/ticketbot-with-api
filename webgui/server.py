@@ -26,6 +26,9 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 PROFILES_DIR = PROJECT_DIR / "profiles"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 CHROME_PROFILES_DIR = PROJECT_DIR / "chrome_profiles"
+# chrome profile 按平台分子資料夾：chrome_profiles/<平台>/<名字>/。這些名字是子資料夾，
+# 不是 profile 本身（掃舊扁平 profile 時要排除）。
+PLATFORM_SUBDIRS = {"tixcraft", "kktix", "ticketplus"}
 
 DEFAULT_EXCLUDE = "輪椅;身障;身心;障礙;Restricted View;燈柱遮蔽;視線不完整;身障票"
 # chrome profile 下拉選單裡代表「不用 user-data-dir、用手貼 COOKIE」的選項
@@ -42,12 +45,16 @@ class InstanceConfig(BaseModel):
     EXCLUDE_AREA_KEYWORD: str = DEFAULT_EXCLUDE
     DATE_KEYWORD: str = ""
     PRESALE_CODE: str = ""
+    LIVENATION_START_URL: str = ""
     TARGET_START_TIME: str = "12:00:00"
     ENABLE_TIME_WATCHER: bool = True
     TIME_WATCH_URL: str = ""
     ENABLE_PROXY_POOL: bool = False
     run_mode: str = "API模式"  # 純前端用，決定 spawn `python -m tixcraftapi` 還是 main.py
-    chrome_profile: str = MANUAL_COOKIE_OPTION  # 純前端用，選的 chrome profile 名
+    chrome_profile: str = MANUAL_COOKIE_OPTION  # 純前端用，「當前平台」選的 chrome profile 名
+    # 純前端用，每平台各記一個 profile（{PLATFORM: profile名}）；切平台時前端自動套用對應的，
+    # save_config 也以這份為準決定 COOKIE_SOURCE / CHROME_USER_DATA_DIR
+    chrome_profile_map: Dict[str, str] = {}
 
 
 class InstanceState:
@@ -92,12 +99,17 @@ def save_config(id: int, cfg: InstanceConfig, tile: dict):
     profile_dir(id).mkdir(parents=True, exist_ok=True)
     out = cfg.model_dump()
     # chrome_profile（前端選的）→ 轉成 Python 端用的 COOKIE_SOURCE / CHROME_USER_DATA_DIR
-    prof = cfg.chrome_profile
+    # 以「當前平台」對應的 profile 為準（chrome_profile_map），沒有再 fallback chrome_profile
+    prof = cfg.chrome_profile_map.get(cfg.PLATFORM) or cfg.chrome_profile
     use_userdata = bool(prof) and prof != MANUAL_COOKIE_OPTION
     out["COOKIE_SOURCE"] = "userdata" if use_userdata else "string"
-    out["CHROME_USER_DATA_DIR"] = (
-        str(CHROME_PROFILES_DIR / prof) if use_userdata else ""
-    )
+    if use_userdata:
+        sub = CHROME_PROFILES_DIR / cfg.PLATFORM.lower() / prof   # 平台子資料夾（新）
+        flat = CHROME_PROFILES_DIR / prof                          # 舊版扁平（相容）
+        path = sub if (sub.exists() or not flat.exists()) else flat
+        out["CHROME_USER_DATA_DIR"] = str(path)
+    else:
+        out["CHROME_USER_DATA_DIR"] = ""
     out.update({
         "ACC_ID": id,
         "WINDOW_X": tile["x"],
@@ -206,13 +218,31 @@ async def index():
 
 
 @app.get("/api/chrome_profiles")
-async def list_chrome_profiles():
-    """掃 chrome_profiles/ 底下的資料夾，回下拉選單清單（含「(手貼COOKIE)」）。"""
+async def list_chrome_profiles(platform: str = ""):
+    """回某平台的 chrome profile 清單（含「(手貼COOKIE)」）。
+
+    profile 放 chrome_profiles/<平台小寫>/<名字>/；
+    舊版扁平 chrome_profiles/<名字>/ 視為 TIXCRAFT（向後相容）。
+    """
     result = [MANUAL_COOKIE_OPTION]
-    if CHROME_PROFILES_DIR.exists():
-        for d in sorted(CHROME_PROFILES_DIR.iterdir()):
-            if d.is_dir():
-                result.append(d.name)
+    seen: Set[str] = set()
+    plat = (platform or "").lower()
+
+    if plat:
+        sub = CHROME_PROFILES_DIR / plat
+        if sub.exists():
+            for d in sorted(sub.iterdir()):
+                if d.is_dir() and d.name not in seen:
+                    result.append(d.name)
+                    seen.add(d.name)
+
+    # 向後相容：扁平 profile（舊版只登拓元）→ 歸到 TIXCRAFT
+    if not platform or plat == "tixcraft":
+        if CHROME_PROFILES_DIR.exists():
+            for d in sorted(CHROME_PROFILES_DIR.iterdir()):
+                if d.is_dir() and d.name.lower() not in PLATFORM_SUBDIRS and d.name not in seen:
+                    result.append(d.name)
+                    seen.add(d.name)
     return result
 
 
@@ -279,8 +309,10 @@ async def _start_one(id: int, req: StartReq) -> dict:
 
     is_api = inst.config.run_mode == "API模式"
     if is_api:
+        # API 模式依平台分派：KKTIX → kktix_api，其餘（拓元）→ tixcraftapi
+        module = "kktix_api" if inst.config.PLATFORM == "KKTIX" else "tixcraftapi"
         args = [
-            sys.executable, "-u", "-m", "tixcraftapi",
+            sys.executable, "-u", "-m", module,
             "--config", str(config_path(id)),
         ]
     else:

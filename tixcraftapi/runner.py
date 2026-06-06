@@ -15,6 +15,7 @@
 
 無 handler / UNKNOWN URL：fallback 回 GAME 從頭重來。
 """
+import itertools
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -22,7 +23,7 @@ from typing import Callable, Optional
 from curl_cffi import requests as cf_requests
 
 import config
-from tixcraftapi import BASE
+from tixcraftapi import BASE, alerts
 from tixcraftapi.area import select_area
 from tixcraftapi.game import select_game
 from tixcraftapi.order import follow_order
@@ -112,8 +113,9 @@ DEFAULT_HANDLERS: dict[State, Handler] = {
 def run(ctx: Context,
         handlers: dict[State, Handler] = DEFAULT_HANDLERS,
         initial: State = State.GAME,
-        max_iter: int = 30) -> Optional[str]:
+        max_iter: Optional[int] = 30) -> Optional[str]:
     """跑 FSM 直到 terminal state 或 max_iter。回成功 URL 或 None。
+    max_iter=None 表示無限制次數（只能靠 terminal state 或外部 stop 結束）。
 
     Cooldown 規則：
       - AREA state 第 1 次進入：0ms（第一拍黃金時間不能浪費）
@@ -121,17 +123,23 @@ def run(ctx: Context,
       - 其他 state 不加額外 cooldown（handler 失敗 / UNKNOWN 仍有 RETRY_INTERVAL）
     """
     AREA_RETRY_COOLDOWN = 5.0
+    BLOCKED_COOLDOWN = 8.0  # 撞 403 時的 cooldown（比 AREA 5s 久，給 server / IP 喘息）
     visit_count: dict[State, int] = {}
+    blocked_403_streak = 0
+    just_did_403_cooldown = False  # 剛睡完 8s → 跳過下一輪 AREA 5s cooldown，避免疊加
 
     state = initial
-    for i in range(max_iter):
+    iterator = itertools.count() if max_iter is None else range(max_iter)
+    for i in iterator:
         ctx.iter_n = i + 1
         visit_count[state] = visit_count.get(state, 0) + 1
 
-        # 清票場景：AREA 被重複進入時加 cooldown
-        if state == State.AREA and visit_count[state] > 1:
+        # 清票場景：AREA 被重複進入時加 cooldown（剛 403 過就不疊加）
+        if (state == State.AREA and visit_count[state] > 1
+                and not just_did_403_cooldown):
             print(f"[FSM] AREA 重複進入第 {visit_count[state]} 次，cooldown {AREA_RETRY_COOLDOWN}s")
             time.sleep(AREA_RETRY_COOLDOWN)
+        just_did_403_cooldown = False
 
         print(f"\n[FSM #{i + 1}] state={state.value}  (visit #{visit_count[state]})")
 
@@ -142,7 +150,31 @@ def run(ctx: Context,
             time.sleep(config.RETRY_INTERVAL)
             continue
 
-        next_url = handler(ctx)
+        try:
+            next_url = handler(ctx)
+            blocked_403_streak = 0  # handler 沒 raise 403 → reset streak
+        except alerts.Blocked403:
+            blocked_403_streak += 1
+            print(f"[FSM] {state.value} 撞 403（連續第 {blocked_403_streak} 次），"
+                  f"cooldown {BLOCKED_COOLDOWN}s 後同 state 重試")
+            time.sleep(BLOCKED_COOLDOWN)
+            just_did_403_cooldown = True
+            continue
+        except Exception as e:
+            # 網路類錯誤（timeout, connection reset 等）→ 同 state 重試
+            # 避免 GAME→AREA 整圈白繞、保住已抓到的 area_url / ticket_url
+            exc_name = type(e).__name__
+            is_network = ("Timeout" in exc_name) or ("Connection" in exc_name) or ("Curl" in exc_name)
+            if is_network:
+                print(f"[FSM] {state.value} 網路錯誤 ({exc_name})，同 state 重試 {config.RETRY_INTERVAL}s 後")
+                time.sleep(config.RETRY_INTERVAL)
+                continue
+            # 邏輯類例外 → fallback GAME 重來
+            print(f"[FSM] {state.value} handler 例外 ({exc_name}: {e})，fallback GAME")
+            state = State.GAME
+            time.sleep(config.RETRY_INTERVAL)
+            continue
+
         if next_url is None:
             print(f"[FSM] {state.value} handler 失敗，fallback GAME")
             state = State.GAME
@@ -153,6 +185,7 @@ def run(ctx: Context,
         print(f"[FSM] {state.value} → {new_state.value}  ({next_url})")
 
         if new_state in TERMINAL_OK:
+            alerts.play_checkout()
             ctx.result_url = next_url
             return next_url
         if new_state in TERMINAL_BAD:
@@ -166,5 +199,6 @@ def run(ctx: Context,
 
         state = new_state
 
+    # max_iter=None 時不會走到這（迴圈無限），只有 max_iter 達上限才會到這
     print(f"[FSM] max_iter {max_iter} 達到，放棄")
     return None
