@@ -1,15 +1,13 @@
 """curl_cffi session 建立 + 共用 header + 暖機/keep-alive。"""
-import re
 import threading
+import time
 
 from curl_cffi import requests as cf_requests
 
 import config
 import proxy_pool
 from tixcraftapi import BASE
-
-# /game/ 頁出現場次按鈕的特徵（用於 keep_alive_loop 偵測「提前開賣」）
-_GAME_BTN_RE = re.compile(r'data-href=["\'][^"\']*?/ticket/area/')
+from tixcraftapi.parsing import game_not_open, has_area_button
 
 
 def build_session(cookie_str: str) -> cf_requests.Session:
@@ -43,19 +41,29 @@ def build_headers(referer: str = "") -> dict:
 
 
 def warmup_session(session: cf_requests.Session, slug: str = ""):
-    """打一次 /activity/game/{slug} 建立 TLS/H2 連線，省下 T-0 第一個請求的握手時間。
+    """打兩次 /activity/game/{slug}：第 1 發建 TLS/H2 連線（含握手成本），
+    第 2 發量純 RTT — 這個數字就是這條 session（含 proxy）的延遲基準，
+    T-0 的 [POLL] / [PERF] 數字比它高很多就代表是 server 端塞車而不是線路問題。
     沒 slug fallback 打首頁。打真正的 game endpoint 讓 server 端 routing handler 也 warm。"""
     target = f"{BASE}/activity/game/{slug}" if slug else f"{BASE}/"
     try:
+        t0 = time.monotonic()
         session.get(target, headers=build_headers(), timeout=5)
-        print(f"[WARMUP] 連線已暖機 ({target})")
+        first_ms = (time.monotonic() - t0) * 1000
+        t1 = time.monotonic()
+        session.get(target, headers=build_headers(), timeout=5)
+        second_ms = (time.monotonic() - t1) * 1000
+        print(f"[WARMUP] 連線已暖機 ({target}) | 第1發 {first_ms:.0f}ms（含握手）/ 第2發 {second_ms:.0f}ms（純 RTT 基準）")
     except Exception as e:
         print(f"[WARMUP] 失敗（不致命）: {e}")
 
 
 def keep_alive_loop(session: cf_requests.Session, stop_event: threading.Event,
-                    slug: str = "", interval: float = 30.0):
-    """背景 thread：定期 ping /activity/game/{slug} 維持 TLS connection + 該 endpoint warm，
+                    slug: str = "", interval: float = 15.0):
+    """背景 thread：定期 ping /activity/game/{slug} 維持 TLS connection + 該 endpoint warm。
+    間隔 15s（原 30s）：proxy / LB 的 idle timeout 常見 30-60s，30s 一次太貼邊，
+    T-0 第一發可能踩到剛被收掉的連線要重握手 — 這正是 session 延遲的主要來源之一。
+    每次 ping 帶 RTT log，開賣前就能看出線路延遲有沒有異常。
     順便看 /game/ HTML 狀態：
       - 「即將開賣 / coming soon」→ 尚未開放
       - 有場次按鈕 → !!! 提前開賣 !!!（log 大聲警告）
@@ -65,15 +73,20 @@ def keep_alive_loop(session: cf_requests.Session, stop_event: threading.Event,
     headers = build_headers()
     while not stop_event.wait(interval):
         try:
+            t0 = time.monotonic()
             res = session.get(target, headers=headers, timeout=5)
-            if not slug or res.status_code != 200:
+            rtt = (time.monotonic() - t0) * 1000
+            if not slug:
+                continue
+            if res.status_code != 200:
+                print(f"[WATCH] ping HTTP {res.status_code} ({rtt:.0f}ms)")
                 continue
             html = res.text
-            if "即將開賣" in html or "coming soon" in html.lower():
-                print("[WATCH] /game/ 尚未開放 (即將開賣)")
-            elif _GAME_BTN_RE.search(html):
-                print("[WATCH] !!! /game/ 已出現場次按鈕，疑似提前開賣 !!!")
+            if game_not_open(html):
+                print(f"[WATCH] /game/ 尚未開放 (即將開賣) | RTT {rtt:.0f}ms")
+            elif has_area_button(html):
+                print(f"[WATCH] !!! /game/ 已出現場次按鈕，疑似提前開賣 !!! (RTT {rtt:.0f}ms)")
             else:
-                print(f"[WATCH] /game/ 200 OK ({len(res.content):,}B) 內容無場次")
-        except Exception:
-            pass
+                print(f"[WATCH] /game/ 200 OK ({len(res.content):,}B) 內容無場次 | RTT {rtt:.0f}ms")
+        except Exception as e:
+            print(f"[WATCH] ping 失敗: {type(e).__name__}: {e}")

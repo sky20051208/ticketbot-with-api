@@ -46,3 +46,11 @@ captchaAI/_label_progress.json
 
 # VSCode 暫存
 tempCodeRunnerFile.py
+
+# Cloudflare Workers（LineBotWorker/）：npm 產物 + 本機開發快取 + 密鑰
+LineBotWorker/node_modules/
+LineBotWorker/.wrangler/
+LineBotWorker/.dev.vars
+
+# 本機真實設定（含 API token / proxy 密碼 / 銀行帳號等機密）；改用 config.py.example 當範本
+config.py

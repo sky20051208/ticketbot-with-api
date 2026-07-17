@@ -45,8 +45,3 @@ def play_checkout():
     """進 checkout 終局時呼叫。"""
     print("[ALERT] 進 checkout，播成功音效")
     _play(SOUND_CHECKOUT)
-
-
-class Blocked403(Exception):
-    """Server 回 403 → FSM 攔下做 8s cooldown + 同 state 重試（不 fallback GAME）。"""
-    pass

@@ -20,9 +20,28 @@
       <button id="btn-init" class="btn btn-cyan">INIT</button>
       <button id="btn-start-all" class="btn btn-green">START ALL</button>
       <button id="btn-stop-all" class="btn btn-red">STOP ALL</button>
+      <button id="btn-customers" class="btn btn-cyan">客人管理</button>
     </div>
   </header>
   <main id="grid"></main>
+
+  <!-- 客人管理面板（LINE 推播對象；資料在 Cloudflare D1，客服 bot 登記也寫這份，這裡走 /api/customers proxy） -->
+  <div id="customer-modal" class="modal-mask" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <span>客人管理（LINE 推播）</span>
+        <button id="btn-customers-close" class="btn btn-red">✕</button>
+      </div>
+      <div class="modal-hint">登記新客人：客人加 LINE 官方帳號好友，輸入「搶票」後依序回覆姓名、演唱會，會自動出現在這裡（24/7 都能登記，不用開電腦）。也可以手動新增。</div>
+      <div id="customer-list" class="customer-list"></div>
+      <div class="customer-add">
+        <input id="cust-name" class="fld" type="text" placeholder="名字">
+        <input id="cust-concert" class="fld" type="text" placeholder="演唱會（選填）">
+        <input id="cust-uid" class="fld" type="text" placeholder="LINE userId（U 開頭 33 碼）">
+        <button id="btn-cust-add" class="btn btn-green">新增</button>
+      </div>
+    </div>
+  </div>
 
   <template id="card-template">
     <section class="card">
@@ -57,6 +76,9 @@
               <label class="check"><input type="checkbox" class="f-timer"><span>TIMER</span></label>
               <label class="check"><input type="checkbox" class="f-proxy"><span>PROXY POOL</span></label>
             </div>
+
+            <div class="field"><label>客人 (LINE通知)</label><select class="fld f-lineuser" title="搶到票後推 LINE 通知給這個客人。客人清單用 topbar「客人管理」維護（客人自己跟客服 bot 對話登記會自動加入）。選 (不推播) = 這張卡不通知。"></select></div>
+            <div class="field f-narrow"><label>搶票費</label><input class="fld f-fee" type="text" placeholder="800" title="寫進通知訊息的搶票費金額（每個客人不同）"></div>
 
             <div class="field"><label>帳號 PROFILE</label><select class="fld f-profile" title="選 chrome profile；(手貼COOKIE) 則用右側 COOKIE 欄位"></select></div>
             <div class="field f-span3"><label>COOKIE</label><input class="fld f-cookie cookie" type="text"></div>

@@ -37,6 +37,15 @@ PLATFORM_LOGIN = {
     "ticketplus": "https://ticketplus.com.tw/",
 }
 
+# 純首頁（proxy 暖機用）。剛換一個新代理 IP 就直衝 Facebook/Google OAuth，對這些平台的
+# 風控來說是「陌生 IP 第一個動作就是登入」的可疑模式，容易被 reCAPTCHA 卡關；先讓這個 IP
+# 逛一下普通頁面再登入，risk 分數會低很多。只在有用 proxy 時才這樣做，直連不需要暖機。
+PLATFORM_HOME = {
+    "tixcraft": "https://tixcraft.com/",
+    "kktix": "https://kktix.com/",
+    "ticketplus": "https://ticketplus.com.tw/",
+}
+
 # Windows 上 Chrome 常見安裝位置
 CHROME_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -95,24 +104,43 @@ def main():
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--lang=zh-TW",  # 語系跟 proxy 的台灣 IP 一致，避免 timezone/locale 跟地理位置對不上
+        "--disable-blink-features=AutomationControlled",  # 保險旗標；一般 Chrome 本來就沒有這個標記
     ]
     # --proxy 明確指定優先；否則 ENABLE_PROXY_POOL=True 自動從 config 建
     proxy_url = args.proxy or _auto_proxy_url(args.name)
+    proxy_applied = False
     if proxy_url:
         local_port = setup_proxy_bridge(proxy_url)
         if local_port is not None:
             cmd.append(f"--proxy-server=http://127.0.0.1:{local_port}")
             cmd.append("--webrtc-ip-handling-policy=disable_non_proxied_udp")
-    cmd.append(login_url)
+            proxy_applied = True
+
+    # 有用 proxy 時先開首頁暖機，不直衝登入頁（見 PLATFORM_HOME 說明）；
+    # 直連沒有「陌生 IP」問題，維持原本直接開登入頁的行為。
+    start_url = PLATFORM_HOME[args.platform] if proxy_applied else login_url
+    cmd.append(start_url)
 
     # 用一般 Chrome 開（非 Selenium）→ Google 登入不會被擋
     proc = subprocess.Popen(cmd)
 
     print("=" * 56)
-    print(f"  1. 在開啟的 Chrome 視窗登入 {args.platform}（Google 登入也 OK）")
-    print(f"     登入頁: {login_url}")
-    print("  2. 登入完成後，關閉那個 Chrome 視窗")
-    print("  3. 回到這裡按 Enter")
+    if proxy_applied:
+        print("  1. 視窗開的是首頁（用 proxy 時先暖機，降低卡 reCAPTCHA 機率）")
+        print("     逛個一兩頁、等個 10~20 秒，再自己點連結進登入頁")
+        print(f"     登入頁: {login_url}")
+        print("  2. 在該頁完成登入（Google/Facebook 登入都可以）")
+        print("     若還是跳出 reCAPTCHA，手動勾選/選圖完成即可，屬正常驗證，")
+        print("     不代表失敗；只有「怎麼解都卡住」才是這組代理 IP 風評不好，")
+        print("     可以換個 --name 拿新的 sid 重試")
+        print("  3. 登入完成後，關閉那個 Chrome 視窗")
+        print("  4. 回到這裡按 Enter")
+    else:
+        print(f"  1. 在開啟的 Chrome 視窗登入 {args.platform}（Google 登入也 OK）")
+        print(f"     登入頁: {login_url}")
+        print("  2. 登入完成後，關閉那個 Chrome 視窗")
+        print("  3. 回到這裡按 Enter")
     print("=" * 56)
     input()
 

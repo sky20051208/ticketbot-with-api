@@ -1,0 +1,8 @@
+name = "linebot-ticket"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "linebot-ticket-db"
+database_id = "68339872-8200-487f-b3b0-1d9a7cb6f68c"

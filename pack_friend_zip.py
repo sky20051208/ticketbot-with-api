@@ -43,9 +43,13 @@ DIRS = [
     "ticketplus",
     "webgui/static",
     "sounds",           # 音效檔（朋友放自己的 403.wav / checkout.wav 進來）
+    "LineBot",          # 本機推播（line_push.py）+ rich menu 設定（setup_richmenu.py）
+    "LineBotWorker",    # 客服選單雲端 Worker 原始碼（src/ + schema.sql + wrangler.toml）
 ]
 
-EXCLUDE_NAMES = {"__pycache__", ".pyc"}
+# 不共用帳號機密的資料夾/檔案（node_modules 是 npm 產物、.wrangler 是本機部署快取，
+# 兩個都不是原始碼，朋友要用 LineBotWorker 自己 npm install 即可重新生成）
+EXCLUDE_NAMES = {"__pycache__", ".pyc", "node_modules", ".wrangler"}
 
 
 def _should_skip(p: Path) -> bool:

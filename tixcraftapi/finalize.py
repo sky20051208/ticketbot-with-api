@@ -5,6 +5,10 @@
 
 啟用 proxy pool 時，這個 Chrome 也會走同一個 proxy（跟 curl_cffi 同 IP），結帳頁瀏覽
 不會洩漏真實 IP — 跟登入/搶票全程一致。
+
+視窗正常開啟顯示（不做最小化/移出螢幕範圍這些花招）——實測過 Chrome 對真正最小化的
+視窗會停止渲染合成，Selenium 截圖會被迫把視窗還原才能拍；改成開在螢幕外雖然能避開
+這個問題，但座標抓不好會變得很難手動找回視窗。折騰一輪後決定不值得，直接正常開窗。
 """
 import tempfile
 import time
@@ -14,6 +18,7 @@ from selenium.webdriver.chrome.options import Options
 
 import browser_login
 import config
+from LineBot import line_push
 
 
 def open_chrome_with_session(session, target_url: str):
@@ -67,6 +72,17 @@ def open_chrome_with_session(session, target_url: str):
                 }
             }, 500);
         """, f"【ACC-{config.ACC_ID}】")
+    except Exception:
+        pass
+
+    if config.ENABLE_LINE_NOTIFY and config.LINE_USER_ID:
+        time.sleep(1.5)  # 等結帳頁渲染完再截圖
+        line_push.notify_checkout_from_driver(config.LINE_USER_ID, driver)
+
+    # 截圖已經拍完，不會再對這個視窗做 resize/捲動/截圖，這時候縮到工具列是安全的
+    # （之前踩的坑是「截圖當下視窗已經最小化」，不是「截圖後才最小化」）
+    try:
+        driver.minimize_window()
     except Exception:
         pass
 

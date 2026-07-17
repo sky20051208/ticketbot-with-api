@@ -17,10 +17,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Optional, Set
 
+import requests
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+import config  # LINE_WORKER_URL / LINE_WORKER_ADMIN_KEY（客人資料存 Cloudflare D1，這裡只是 proxy）
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 PROFILES_DIR = PROJECT_DIR / "profiles"
@@ -50,6 +53,8 @@ class InstanceConfig(BaseModel):
     ENABLE_TIME_WATCHER: bool = True
     TIME_WATCH_URL: str = ""
     ENABLE_PROXY_POOL: bool = False
+    LINE_USER_ID: str = ""   # 客人的 LINE userId（LINE 客服 bot 登記取得；空 = 不推播）
+    TICKET_FEE: str = ""     # 搶票費（每個客人不同，寫進通知訊息）
     run_mode: str = "API模式"  # 純前端用，決定 spawn `python -m tixcraftapi` 還是 main.py
     chrome_profile: str = MANUAL_COOKIE_OPTION  # 純前端用，「當前平台」選的 chrome profile 名
     # 純前端用，每平台各記一個 profile（{PLATFORM: profile名}）；切平台時前端自動套用對應的，
@@ -244,6 +249,66 @@ async def list_chrome_profiles(platform: str = ""):
                     result.append(d.name)
                     seen.add(d.name)
     return result
+
+
+# 客人資料存在 Cloudflare Workers + D1（LineBotWorker/），這裡的 /api/customers
+# 全是 proxy：webgui 帶 ADMIN_KEY 打 Worker 的同名 API，本機不再存客人資料庫。
+# 這樣客人用客服 bot 登記時（電腦關著也行）跟 GUI 看到的是同一份資料。
+
+def _worker_headers() -> dict:
+    return {"X-Admin-Key": config.LINE_WORKER_ADMIN_KEY, "Content-Type": "application/json"}
+
+
+def _require_worker_url():
+    if not config.LINE_WORKER_URL:
+        raise HTTPException(400, "尚未設定 config.py 的 LINE_WORKER_URL（LineBotWorker 部署後填）")
+
+
+class Customer(BaseModel):
+    name: str
+    user_id: str
+    concert: str = ""
+
+
+@app.get("/api/customers")
+async def list_customers():
+    if not config.LINE_WORKER_URL:
+        return []  # 還沒部署 Worker 時讓 GUI 照常開，只是客人下拉是空的
+    try:
+        res = requests.get(f"{config.LINE_WORKER_URL}/api/customers",
+                           headers=_worker_headers(), timeout=8)
+        res.raise_for_status()
+        return res.json()
+    except requests.RequestException as e:
+        raise HTTPException(502, f"連不到 LINE Worker: {e}")
+
+
+@app.post("/api/customers")
+async def add_customer(c: Customer):
+    uid = c.user_id.strip()
+    if not uid:
+        raise HTTPException(400, "user_id 不能為空")
+    _require_worker_url()
+    res = requests.post(f"{config.LINE_WORKER_URL}/api/customers",
+                        headers=_worker_headers(),
+                        data=json.dumps({"name": c.name.strip(), "user_id": uid,
+                                        "concert": c.concert.strip()}),
+                        timeout=8)
+    if res.status_code != 200:
+        raise HTTPException(502, f"LINE Worker 回應 {res.status_code}: {res.text[:200]}")
+    return {"ok": True}
+
+
+@app.delete("/api/customers/{user_id}")
+async def delete_customer(user_id: str):
+    _require_worker_url()
+    res = requests.delete(f"{config.LINE_WORKER_URL}/api/customers/{user_id}",
+                          headers=_worker_headers(), timeout=8)
+    if res.status_code == 404:
+        raise HTTPException(404)
+    if res.status_code != 200:
+        raise HTTPException(502, f"LINE Worker 回應 {res.status_code}: {res.text[:200]}")
+    return {"ok": True}
 
 
 @app.get("/api/instances")

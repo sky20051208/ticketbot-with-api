@@ -5,6 +5,7 @@ const PLATFORMS  = ["TIXCRAFT", "KKTIX", "TICKETPLUS"];
 const AREA_MODES = ["關鍵字優先", "由上而下", "由下而上", "隨機"];
 const RUN_MODES  = ["API模式", "瀏覽器模式"];
 const MANUAL_COOKIE = "(手貼COOKIE)";
+let CUSTOMERS = [];  // [{name, user_id, concert}]，由 /api/customers 填（proxy 到 Cloudflare Worker + D1）
 let CHROME_PROFILES_BY_PLATFORM = {};  // {平台: [profile名...]}，由 /api/chrome_profiles 填
 function profilesFor(platform) {
   const list = CHROME_PROFILES_BY_PLATFORM[platform];
@@ -73,7 +74,28 @@ async function refresh() {
   } catch (_) {
     CHROME_PROFILES_BY_PLATFORM = {};  // server 還沒重啟也讓 grid 照常 render
   }
+  try {
+    CUSTOMERS = await api("GET", "/api/customers");
+  } catch (_) {
+    CUSTOMERS = [];
+  }
   renderGrid(items);
+}
+
+// f-lineuser 下拉：(不推播) + Worker 客人清單；已刪除的客人保留原值顯示避免默默丟設定
+function fillCustomerSelect(sel, currentUid) {
+  sel.innerHTML = "";
+  const add = (value, label) => {
+    const o = document.createElement("option");
+    o.value = value; o.textContent = label;
+    sel.appendChild(o);
+  };
+  add("", "(不推播)");
+  for (const c of CUSTOMERS) add(c.user_id, c.concert ? `${c.name} － ${c.concert}` : c.name);
+  if (currentUid && !CUSTOMERS.some(c => c.user_id === currentUid)) {
+    add(currentUid, `${currentUid.slice(0, 10)}…(已不在清單)`);
+  }
+  sel.value = currentUid || "";
 }
 
 function renderGrid(items) {
@@ -119,6 +141,10 @@ function renderCard(item) {
   bindText  (card, ".f-watchurl", cfg.TIME_WATCH_URL);
   bindCheck (card, ".f-timer",    cfg.ENABLE_TIME_WATCHER);
   bindCheck (card, ".f-proxy",    cfg.ENABLE_PROXY_POOL);
+  const _custSel = card.querySelector(".f-lineuser");
+  fillCustomerSelect(_custSel, cfg.LINE_USER_ID);
+  _custSel.addEventListener("change", () => scheduleSave(card));
+  bindText  (card, ".f-fee",      cfg.TICKET_FEE);
   bindText  (card, ".f-cookie",   cfg.COOKIE);
 
   // 每平台各記一個 chrome profile：下拉只列「當前平台」的 profile，切 PLATFORM 時自動重列+套用
@@ -212,6 +238,8 @@ function readCardConfig(card) {
     TIME_WATCH_URL:          card.querySelector(".f-watchurl").value,
     ENABLE_TIME_WATCHER:     card.querySelector(".f-timer").checked,
     ENABLE_PROXY_POOL:       card.querySelector(".f-proxy").checked,
+    LINE_USER_ID:            card.querySelector(".f-lineuser").value,
+    TICKET_FEE:              card.querySelector(".f-fee").value,
     COOKIE:                  card.querySelector(".f-cookie").value,
   };
 }
@@ -308,6 +336,73 @@ $("#btn-start-all").addEventListener("click", async () => {
 });
 $("#btn-stop-all").addEventListener("click", async () => {
   await api("POST", "/api/stop_all");
+});
+
+// ---------- 客人管理面板（資料存 Cloudflare D1，客服 bot 登記也寫同一份，這裡走 /api/customers proxy） ----------
+
+async function reloadCustomers() {
+  try { CUSTOMERS = await api("GET", "/api/customers"); } catch (_) { CUSTOMERS = []; }
+  renderCustomerList();
+  // 所有卡片的下拉就地更新，保住當前選擇，不重建卡片（避免打斷 log / 未存編輯）
+  for (const card of $$(".card")) {
+    const sel = card.querySelector(".f-lineuser");
+    if (sel) fillCustomerSelect(sel, sel.value);
+  }
+}
+
+function renderCustomerList() {
+  const box = $("#customer-list");
+  box.innerHTML = "";
+  if (!CUSTOMERS.length) {
+    box.innerHTML = '<div class="customer-empty">還沒有客人 — 叫客人加 LINE 官方帳號好友輸入「搶票」登記，或下方手動新增</div>';
+    return;
+  }
+  for (const c of CUSTOMERS) {
+    const row = document.createElement("div");
+    row.className = "customer-row";
+    const name = document.createElement("span");
+    name.className = "customer-name";
+    name.textContent = c.name;
+    const concert = document.createElement("span");
+    concert.className = "customer-concert";
+    concert.textContent = c.concert || "";
+    const uid = document.createElement("span");
+    uid.className = "customer-uid";
+    uid.textContent = c.user_id;
+    uid.title = c.user_id;
+    const del = document.createElement("button");
+    del.className = "btn btn-red";
+    del.textContent = "刪除";
+    del.addEventListener("click", async () => {
+      if (!confirm(`刪除客人「${c.name}」？\n（已選這個客人的卡片會顯示「已不在清單」但設定不會被清掉）`)) return;
+      await api("DELETE", `/api/customers/${encodeURIComponent(c.user_id)}`);
+      await reloadCustomers();
+    });
+    row.append(name, concert, uid, del);
+    box.appendChild(row);
+  }
+}
+
+$("#btn-customers").addEventListener("click", async () => {
+  await reloadCustomers();
+  $("#customer-modal").hidden = false;
+});
+$("#btn-customers-close").addEventListener("click", () => {
+  $("#customer-modal").hidden = true;
+});
+$("#customer-modal").addEventListener("click", (e) => {
+  if (e.target === $("#customer-modal")) $("#customer-modal").hidden = true;
+});
+$("#btn-cust-add").addEventListener("click", async () => {
+  const name    = $("#cust-name").value.trim();
+  const concert = $("#cust-concert").value.trim();
+  const uid     = $("#cust-uid").value.trim();
+  if (!uid) { alert("userId 不能為空（U 開頭那串）"); return; }
+  await api("POST", "/api/customers", { name, concert, user_id: uid });
+  $("#cust-name").value = "";
+  $("#cust-concert").value = "";
+  $("#cust-uid").value = "";
+  await reloadCustomers();
 });
 
 refresh();

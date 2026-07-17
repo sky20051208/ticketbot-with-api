@@ -6,7 +6,8 @@
   - main() 主流程：cookie → 暖機 → 定時 → FSM run → 搶到後接管
 
 實際搶票邏輯走 FSM (tixcraftapi.runner)；URL classify + state transition 在 state.py。
-搶票各步驟模組：session / parsing / game / verify / area / captcha / submit / order / finalize。
+搶票各步驟模組：session / parsing / game / verify / area / captcha / submit / order / finalize，
+共用例外在 errors.py（Blocked403）、音效在 alerts.py（只有 runner 呼叫）。
 """
 import sys
 import time
@@ -20,6 +21,7 @@ import config
 import proxy_pool
 import browser_login
 from captchaAI.predict import warmup_ocr
+from LineBot import line_push
 from timeWatcher import TimeWatcher
 
 from tixcraftapi import BASE
@@ -195,6 +197,15 @@ def main():
                 browser_login.inject_cookies_and_go(
                     login_driver, session, result_url, acc_id=config.ACC_ID)
                 grabbed = True
+                if config.ENABLE_LINE_NOTIFY and config.LINE_USER_ID:
+                    time.sleep(1.5)  # 等結帳頁渲染完再截圖
+                    line_push.notify_checkout_from_driver(config.LINE_USER_ID, login_driver)
+                # 截圖已經拍完，不會再對這個視窗做 resize/捲動/截圖，這時候縮到工具列是安全的
+                # （之前踩的坑是「截圖當下視窗已經最小化」，不是「截圖後才最小化」）
+                try:
+                    login_driver.minimize_window()
+                except Exception:
+                    pass
             else:
                 # string 模式：開新的乾淨 Chrome 注入 session
                 open_chrome_with_session(session, result_url)

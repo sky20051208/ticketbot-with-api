@@ -1,42 +1,37 @@
-"""Step 2: presale code 驗證頁（從 area 步驟被 redirect 過來才會用到）。"""
+"""Step 2: presale code 驗證頁（由 FSM 的 VERIFY state handler 呼叫）。
+
+presale_code 由 runner 注入（config.PRESALE_CODE），本檔不讀 config。
+"""
 import json
 import re
 
 from curl_cffi import requests as cf_requests
 
-import config
-from tixcraftapi import BASE, alerts
+from tixcraftapi import BASE
+from tixcraftapi.errors import raise_if_blocked
+from tixcraftapi.parsing import parse_hidden_inputs
 
 
 def handle_verify(session: cf_requests.Session, verify_url: str,
-                  headers: dict) -> bool:
+                  headers: dict, presale_code: str = "") -> bool:
     """處理 presale code 驗證頁。POST check-code endpoint 帶 _csrf + checkCode。"""
     res = session.get(verify_url, headers=headers)
+    raise_if_blocked(res, "VERIFY")
     if res.status_code != 200:
         print(f"[VERIFY] GET 失敗 HTTP {res.status_code}")
-        if res.status_code == 403:
-            alerts.play_403("VERIFY")
-            raise alerts.Blocked403("VERIFY")
         return False
 
     html = res.text
 
-    # 抽出表單裡所有 hidden 欄位（不只 _csrf，可能還有 gameID 等）
-    hidden: dict[str, str] = {}
-    for m in re.finditer(r'<input[^>]+type=["\']hidden["\'][^>]*>', html):
-        tag = m.group(0)
-        name_m = re.search(r'name=["\']([^"\']+)["\']', tag)
-        val_m = re.search(r'value=["\']([^"\']*)["\']', tag)
-        if name_m:
-            hidden[name_m.group(1)] = val_m.group(1) if val_m else ""
-
+    # 表單所有 hidden 欄位（不只 _csrf，可能還有 gameID 等）
+    hidden = parse_hidden_inputs(html)
     if "_csrf" not in hidden:
         print("[VERIFY] 找不到 _csrf")
         return False
 
-    # 優先用 config 會員碼；沒填才 fallback 抓頁面【】裡的答案
-    if config.PRESALE_CODE:
-        answer = config.PRESALE_CODE
+    # 優先用注入的會員碼；沒填才 fallback 抓頁面【】裡的答案
+    if presale_code:
+        answer = presale_code
         print(f"[VERIFY] 使用 config 會員碼: {answer[:3]}***")
     else:
         ans_m = re.search(r'【([^】]+)】', html)

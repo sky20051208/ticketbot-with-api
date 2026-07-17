@@ -1,28 +1,25 @@
-"""HTML / JS 解析（純 regex，不打網路）。submit / game 步驟共用。"""
+"""HTML / JS 解析（純 regex，不打網路）。
+
+「拓元頁面長什麼樣」的知識全部集中在這檔 — 拓元改版時只改這裡。
+game / verify / area / submit / session(keep-alive) 共用。
+"""
+import json
 import re
 
-
-def parse_ticket_form(html: str) -> dict:
-    payload = {}
-    for m in re.finditer(r'<input[^>]+type=["\']hidden["\'][^>]*>', html):
-        tag = m.group(0)
-        name_m = re.search(r'name=["\']([^"\']+)["\']', tag)
-        val_m = re.search(r'value=["\']([^"\']*)["\']', tag)
-        if name_m:
-            name = name_m.group(1)
-            value = val_m.group(1) if val_m else ""
-            if "_csrf" in name or "TicketForm" in name:
-                payload[name] = value
-    return payload
+# /game/ 頁出現場次按鈕的特徵（已開賣）
+_GAME_BTN_RE = re.compile(r'data-href=["\'][^"\']*?/ticket/area/')
 
 
-def find_ticket_codes(payload: dict) -> list[str]:
-    codes = []
-    for k in payload:
-        m = re.search(r'TicketForm\[(?:ticketPrice|priceSize)\]\[(\w+)\]', k)
-        if m and m.group(1) not in codes:
-            codes.append(m.group(1))
-    return codes
+# ---------- game 頁 ----------
+
+def game_not_open(html: str) -> bool:
+    """game 頁還在「即將開賣」狀態（尚未放票）。"""
+    return "即將開賣" in html or "coming soon" in html.lower()
+
+
+def has_area_button(html: str) -> bool:
+    """game 頁已出現場次按鈕（開賣特徵，keep-alive 提前開賣偵測用）。"""
+    return bool(_GAME_BTN_RE.search(html))
 
 
 def parse_game_area_url(html: str, date_keyword: str = "") -> str | None:
@@ -43,3 +40,67 @@ def parse_game_area_url(html: str, date_keyword: str = "") -> str | None:
     if fallback:
         return fallback.group(1)
     return None
+
+
+# ---------- 表單 hidden 欄位（verify 頁 / ticket 頁共用） ----------
+
+def parse_hidden_inputs(html: str) -> dict:
+    """抽出所有 <input type="hidden"> 的 name → value。"""
+    fields: dict[str, str] = {}
+    for m in re.finditer(r'<input[^>]+type=["\']hidden["\'][^>]*>', html):
+        tag = m.group(0)
+        name_m = re.search(r'name=["\']([^"\']+)["\']', tag)
+        val_m = re.search(r'value=["\']([^"\']*)["\']', tag)
+        if name_m:
+            fields[name_m.group(1)] = val_m.group(1) if val_m else ""
+    return fields
+
+
+def parse_ticket_form(html: str) -> dict:
+    """ticket 頁表單：只留 _csrf 和 TicketForm 系列欄位。"""
+    return {k: v for k, v in parse_hidden_inputs(html).items()
+            if "_csrf" in k or "TicketForm" in k}
+
+
+def find_ticket_codes(payload: dict) -> list[str]:
+    codes = []
+    for k in payload:
+        m = re.search(r'TicketForm\[(?:ticketPrice|priceSize)\]\[(\w+)\]', k)
+        if m and m.group(1) not in codes:
+            codes.append(m.group(1))
+    return codes
+
+
+# ---------- area 頁 ----------
+
+def parse_area_availables(html: str) -> list[tuple[str, str, str]] | None:
+    """從 area 頁抽可購買區域 [(area_id, 區名文字, ticket_url), ...]。
+
+    areaUrlList 可能是 dict JS literal、逐筆 areaUrlList[id]=url，或根本不存在。
+    已售完的區域沒有 <a id="21567_22"> 標籤。
+    回 None = 頁面沒有 areaUrlList（未開賣/全售完/解析失敗）；回 [] = 有列表但沒可買的 <a>。
+    """
+    url_list_m = re.search(r'areaUrlList\s*=\s*(\{.*?\})', html, re.DOTALL)
+    if url_list_m:
+        try:
+            area_urls = json.loads(url_list_m.group(1))
+        except json.JSONDecodeError:
+            return None
+    else:
+        assigns = re.findall(
+            r'areaUrlList\[(["\']?)([^\]"\']+)\1\]\s*=\s*["\']([^"\']+)["\']', html
+        )
+        if not assigns:
+            return None
+        area_urls = {key: val for _, key, val in assigns}
+
+    available = []
+    for m in re.finditer(
+        r'<a\s+id=["\'](\d+_\d+)["\'][^>]*>(.*?)</a>',
+        html, re.DOTALL
+    ):
+        area_id = m.group(1)
+        area_text = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+        if area_id in area_urls:
+            available.append((area_id, area_text, area_urls[area_id]))
+    return available
