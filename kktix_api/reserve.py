@@ -1,22 +1,29 @@
-"""Step 2：下單 — 加入 KKTIX queue 候位（透過瀏覽器 fetch）。
+"""Step 2：下單 — 完整候位 → redeem → confirm_booking（透過瀏覽器 fetch，全部真實抓包驗證）。
 
-✅ join_queue 已用真實抓包驗證：
-   POST https://queue.kktix.com/queue/{slug}?authenticity_token={URL-encoded CSRF}
-   Content-Type: text/plain（body 是 JSON）
-   body: {"tickets":[{"id":<int>,"quantity":<n>,"invitationCodes":[...],
-                      "use_qualification_id":null}],
-          "currency":"TWD","recaptcha":{},"agreeTerm":true}
-   回 200: {"token":"<JWT>"}
-   走瀏覽器 fetch：queue.kktix.com 是 kktix.com 的跨子網域，但 KKTIX 有開 CORS +
-   credentials，fetch 會自動帶上 cf_clearance + 登入 cookie。
+真實流程（2026-07 攔封包驗證）：
+  1) join_queue     POST queue.kktix.com/queue/{slug}?authenticity_token={URL-encoded CSRF}
+                    Content-Type text/plain, body:
+                    {"tickets":[{"id":<int>,"quantity":<n>,"invitationCodes":[...],
+                                 "use_qualification_id":null}],
+                     "currency":"TWD","recaptcha":{},"agreeTerm":true}
+                    → 200 {"token":"<JWT>"}
+  2) redeem_queue   GET queue.kktix.com/queue/token/{token}
+                    → 200 {"to_param":"<報名id，如 157460846-3724ee...>"}
+  3) confirm_booking PATCH kktix.com/g/events/{slug}/registrations/{to_param}/confirm_booking
+                    body {} + X-CSRF-Token header
+                    → 200 {state:pending, booking_state:confirmed, ...}  ← 真的佔到位
+  4) 回 order URL kktix.com/events/{slug}/registrations/{to_param}#/booking
+                    由 __main__ 導瀏覽器過去，讓客人填資料 + 付款
 
-⚠️ redeem_queue（token → order 頁）後續封包還沒驗證，先 best-effort；拿不到就回 None，
-   由 __main__ 把瀏覽器導到報名頁讓使用者完成（此時已在 queue 內）。
+全部走瀏覽器 fetch：queue.kktix.com 是 kktix.com 的跨子網域，但 KKTIX 有開 CORS + credentials，
+fetch 自動帶 cf_clearance + 登入 cookie；confirm_booking 是同源 PATCH，帶 X-CSRF-Token。
 """
+import time
 import json
+import asyncio
 import urllib.parse
 
-from kktix_api import BASE
+from kktix_api import BASE, parsing
 from kktix_api.register import OpenResult
 from kktix_api.browser_session import page_fetch
 import config
@@ -69,31 +76,61 @@ async def join_queue(tab, slug: str, result: OpenResult) -> str | None:
     return None
 
 
-async def redeem_queue(tab, slug: str, token: str) -> str | None:
-    """⚠️ best-effort：拿候位 token 試輪詢取 order 頁。後續封包未驗證，先試 + 印回應。"""
-    import re
-    candidates = [
-        f"{QUEUE_BASE}/queue/{slug}/status?token={urllib.parse.quote(token, safe='')}",
-        f"{QUEUE_BASE}/queue/{slug}?token={urllib.parse.quote(token, safe='')}",
-    ]
-    order_re = re.compile(r"/events/[^/]+/registrations/(\d+)")
-    for url in candidates:
+async def redeem_queue(tab, slug: str, token: str,
+                       max_wait: float = 120.0, interval: float = 0.2) -> str | None:
+    """拿候位 token 輪詢兌換 report id（to_param）。
+
+    候位 token 不是拿到就能兌換 —— 要一直 GET queue/token/{token}，還沒輪到會回
+    {"result":"not_found"}，輪到才回 {"to_param":"..."}。T-0 大排隊時可能要等一陣子。
+    回 to_param 或 None（超時）。"""
+    url = f"{QUEUE_BASE}/queue/token/{token}"
+    deadline = time.monotonic() + max_wait
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
         res = await page_fetch(tab, url, headers={"Accept": "application/json, text/plain, */*"})
-        if not res.get("ok"):
-            continue
-        text = res.get("text") or ""
-        m = order_re.search(text)
-        if m:
-            order_url = f"{BASE}/events/{slug}/registrations/{m.group(1)}"
-            print(f"[RESERVE] ✅ 取得 order 頁: {order_url}")
-            return order_url
-        print(f"[RESERVE] redeem {url} → HTTP {res.get('status')}: {text[:200]}")
+        if res.get("ok") and res.get("status") == 200:
+            text = res.get("text", "")
+            to_param = parsing.parse_redeem_to_param(text)
+            if to_param:
+                print(f"[RESERVE] ✅ redeem 取得報名 id: {to_param}（第 {attempt} 次）")
+                return to_param
+            if attempt <= 3 or attempt % 20 == 0:
+                print(f"[RESERVE] 候位中，尚未輪到...（{text[:80]}）")
+        elif attempt <= 3:
+            print(f"[RESERVE] redeem HTTP {res.get('status')}，重試")
+        await asyncio.sleep(interval)
+    print(f"[RESERVE] redeem 超時 {max_wait}s（{attempt} 次）未輪到")
     return None
 
 
+async def confirm_booking(tab, slug: str, to_param: str, csrf_token: str) -> bool:
+    """PATCH confirm_booking 真的佔位。回 True/False（失敗不致命，仍可導頁讓客人手動確認）。"""
+    url = f"{BASE}/g/events/{slug}/registrations/{to_param}/confirm_booking"
+    res = await page_fetch(tab, url, method="PATCH", body="{}",
+                           headers={"Content-Type": "application/json",
+                                    "Accept": "application/json, text/plain, */*",
+                                    "X-CSRF-Token": csrf_token})
+    if not res.get("ok") or res.get("status") != 200:
+        print(f"[RESERVE] confirm_booking 失敗 HTTP {res.get('status')}: {(res.get('text') or '')[:200]}")
+        return False
+    try:
+        state = json.loads(res["text"]).get("booking_state")
+    except Exception:
+        state = None
+    print(f"[RESERVE] ✅ confirm_booking OK（booking_state={state}）")
+    return True
+
+
 async def reserve_ticket(tab, slug: str, result: OpenResult) -> str | None:
-    """完整下單：加入候位 → 試取 order 頁。回 order URL 或 None（fallback 瀏覽器交棒）。"""
+    """完整下單：候位 → redeem → confirm_booking。回 order URL 或 None（fallback 瀏覽器交棒）。"""
     token = await join_queue(tab, slug, result)
     if not token:
         return None
-    return await redeem_queue(tab, slug, token)
+    to_param = await redeem_queue(tab, slug, token)
+    if not to_param:
+        return None
+    await confirm_booking(tab, slug, to_param, result.csrf_token)  # 失敗不致命
+    order_url = f"{BASE}/events/{slug}/registrations/{to_param}#/booking"
+    print(f"[RESERVE] ✅ order 頁: {order_url}")
+    return order_url

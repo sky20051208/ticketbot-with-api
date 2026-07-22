@@ -5,6 +5,7 @@
 並補上「依 config 挑票」與「抓 CSRF token」。
 """
 import re
+import json
 from html import unescape
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -138,3 +139,86 @@ def select_ticket(units: list[dict], *, keyword: str, exclude: str,
     chosen = dict(pool[0])
     chosen["amount"] = max(1, amount)
     return chosen
+
+
+# ---------------------------------------------------------------------------
+# 純封包（API）版票種來源 —— KKTIX 報名頁票種是 Angular 前端渲染，raw HTML 沒有；
+# 票名/票價在 base_info API、票況在 register_info API。以下把兩者解成 select_ticket 能吃的 units，
+# 完全不需要瀏覽器渲染。
+# ---------------------------------------------------------------------------
+
+def _price_str(price: dict) -> str:
+    """{"cents":328000,"currency":"TWD"} → "TWD$3,280"（對齊渲染 DOM 的顯示格式）。"""
+    cents = price.get("cents")
+    if not isinstance(cents, int):
+        return ""
+    return f'{price.get("currency", "TWD")}${cents // 100:,}'
+
+
+def parse_base_info(json_text: str) -> list[dict]:
+    """base_info API 的 eventData.tickets → 靜態票種目錄（含票名/票價，開場前抓一次即可）。
+    每項: ticket_id, name, price(顯示字串), min_to_buy, max_to_buy, need_invitation_code, position。"""
+    try:
+        data = json.loads(json_text)
+    except Exception:
+        return []
+    tickets = (data.get("eventData") or {}).get("tickets") or []
+    out = []
+    for t in tickets:
+        out.append({
+            "ticket_id": str(t.get("id")),
+            "name": t.get("name", "") or "",
+            "price": _price_str(t.get("price") or {}),
+            "min_to_buy": t.get("min_to_buy", 1),
+            "max_to_buy": t.get("max_to_buy"),
+            "need_invitation_code": bool(t.get("need_invitation_code")),
+            "position": t.get("position", 0),
+        })
+    return out
+
+
+def parse_register_info(json_text: str) -> dict:
+    """register_info API → 動態票況。
+    回 {register_status, open(bool), in_stock_ids(set[str]), sections(dict id→stock_level)}。"""
+    empty = {"register_status": "", "open": False, "in_stock_ids": set(), "sections": {}}
+    try:
+        data = json.loads(json_text)
+    except Exception:
+        return empty
+    status = data.get("register_status", "") or ""
+    in_stock = {str(t.get("id")) for t in (data.get("tickets") or []) if t.get("in_stock")}
+    sections = {str(s.get("id")): s.get("stock_level")
+                for s in (data.get("sections") or [])}
+    return {
+        "register_status": status,
+        "open": status == "IN_STOCK" or bool(in_stock),
+        "in_stock_ids": in_stock,
+        "sections": sections,
+    }
+
+
+def parse_redeem_to_param(json_text: str) -> str:
+    """候位 redeem 回應（GET queue/token/{token}）→ to_param（報名 id，如 "157460846-3724ee..."）。
+    沒有就回空字串。"""
+    try:
+        return json.loads(json_text).get("to_param", "") or ""
+    except Exception:
+        return ""
+
+
+def merge_availability(catalog: list[dict], reg_info: dict) -> list[dict]:
+    """base_info 票種目錄 + register_info 票況 → select_ticket 能吃的 units。
+    有票(in_stock) → status=available & selectable=True；否則 sold_out。"""
+    ids = reg_info.get("in_stock_ids") or set()
+    units = []
+    for c in catalog:
+        in_stock = c["ticket_id"] in ids
+        units.append({
+            "ticket_id": c["ticket_id"],
+            "name": c["name"],
+            "label": "",
+            "price": c["price"],
+            "status": "available" if in_stock else "sold_out",
+            "selectable": in_stock,
+        })
+    return units

@@ -1,14 +1,20 @@
-"""Step 1：抓 registrations/new（透過瀏覽器 fetch）、偵測開賣、依 config 選票。
+"""Step 1（純封包版）：偵測 KKTIX 開賣 + 依 config 選票。
 
-改走瀏覽器 fetch（page_fetch）而非 curl_cffi：瀏覽器自動帶 cf_clearance + 登入 session，
-不會 403、不用解 cookie。registrations/new 跟瀏覽器同源，fetch 最快。
+KKTIX 報名頁票種是 Angular 前端渲染，raw HTML / 高頻 fetch 頁面都拿不到票種 —— 所以改走 KKTIX
+自己的 JSON API（跟 Angular 前端打的同一組），完全不需渲染：
+  - base_info     /g/events/{slug}/base_info     靜態票種目錄（票名/票價/id/張數限制），開場前抓一次
+  - register_info /g/events/{slug}/register_info  動態票況（register_status + 每個 id 的 in_stock），高頻輪詢
+  - csrf 從 registrations/new raw HTML 的 <meta name="csrf-token"> 抓（下單 join_queue 要用）
+全部透過 browser_session.page_fetch 在已登入頁面同源打，自動帶 cf_clearance + 登入 session，不會 403。
+
+⚠️ slug 必須是「場次」slug（如 cb2818b8），不是「活動」slug（如 y9abe2f0，那頁是選場次頁）。
 """
 import time
 import asyncio
 from dataclasses import dataclass
 
 import config
-from kktix_api import parsing
+from kktix_api import BASE, parsing
 from kktix_api.session import registration_url
 from kktix_api.browser_session import page_fetch
 
@@ -21,8 +27,68 @@ class OpenResult:
     url: str
 
 
-def _select_from_html(html: str) -> dict | None:
-    units = parsing.parse_registration_ticket_units(html)
+async def _get_json(tab, url: str) -> str | None:
+    res = await page_fetch(tab, url, headers={"Accept": "application/json, text/plain, */*"})
+    if not res.get("ok") or res.get("status") != 200:
+        return None
+    return res.get("text", "")
+
+
+async def fetch_catalog_and_csrf(tab, slug: str) -> tuple[list[dict], str]:
+    """預抓 base_info 票種目錄 + registrations/new csrf token（兩者皆靜態）。
+
+    ★ 在倒數（TimeWatcher）之前呼叫，T-0 一到 poll_until_open 只剩最快的 register_info 輪詢，
+      不必在開賣瞬間才抓這兩支慢的（省開賣當下 ~340ms）。"""
+    catalog = []
+    bi = await _get_json(tab, f"{BASE}/g/events/{slug}/base_info")
+    if bi:
+        catalog = parsing.parse_base_info(bi)
+
+    csrf = ""
+    reg = await page_fetch(tab, registration_url(slug))
+    if reg.get("ok"):
+        csrf = parsing.extract_csrf_token(reg.get("text", ""))
+
+    if catalog:
+        print("[REGISTER] 票種目錄: "
+              + ", ".join(f"{c['ticket_id']}={c['name']}({c['price']})" for c in catalog))
+    else:
+        print("[REGISTER] ⚠️ 抓不到 base_info 票種目錄（確認 slug 是『場次』slug，非活動 slug）")
+    if not csrf:
+        print("[REGISTER] ⚠️ 沒抓到 csrf token —— 下單會失敗，檢查登入 / slug")
+    return catalog, csrf
+
+
+async def keep_alive_refresh(tab, slug: str, holder: dict, interval: float = 120.0):
+    """倒數期間背景跑：定期重抓 registrations/new → 更新 holder['csrf'] + 維持 session 不過期。
+
+    csrf 是綁 session 的，太早啟動、等很久後原本那顆可能隨 session 失效；這裡定期換新，
+    順便當 keep-alive（GET 一下讓 KKTIX session 保持活著）。被 cancel（T-0 到）時安靜結束。"""
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            reg = await page_fetch(tab, registration_url(slug))
+            if reg.get("ok"):
+                token = parsing.extract_csrf_token(reg.get("text", ""))
+                if token:
+                    holder["csrf"] = token
+                    print("[KEEPALIVE] csrf 已更新 + session 保活")
+                else:
+                    print("[KEEPALIVE] ⚠️ 重抓未拿到 csrf（session 可能已失效，檢查登入）")
+            else:
+                print("[KEEPALIVE] ⚠️ keep-alive 請求失敗")
+    except asyncio.CancelledError:
+        pass
+
+
+async def fetch_register_info(tab, slug: str) -> dict | None:
+    """抓 + 解析 register_info，回 parsing.parse_register_info 的 dict，失敗回 None。"""
+    body = await _get_json(tab, f"{BASE}/g/events/{slug}/register_info")
+    return parsing.parse_register_info(body) if body is not None else None
+
+
+def _select(catalog: list[dict], reg_info: dict) -> dict | None:
+    units = parsing.merge_availability(catalog, reg_info)
     return parsing.select_ticket(
         units,
         keyword=config.AREA_KEYWORD,
@@ -32,83 +98,33 @@ def _select_from_html(html: str) -> dict | None:
     )
 
 
-async def fetch_once(tab, slug: str, verbose: bool = True) -> OpenResult | None:
-    url = registration_url(slug)
-    res = await page_fetch(tab, url)
-    if not res.get("ok"):
-        if verbose:
-            print(f"[REGISTER] fetch 失敗: {res.get('error')}")
-        return None
-    if res.get("status") != 200:
-        if verbose:
-            print(f"[REGISTER] HTTP {res.get('status')}")
-        return None
-
-    html = res.get("text", "")
-    if parsing.detect_challenge(html):
-        if verbose:
-            print("[REGISTER] 撞到安全驗證頁（理論上 fetch 不該遇到，檢查登入）")
-        return None
-    if not parsing.is_registration_open(html):
-        if verbose:
-            print("[REGISTER] 尚未開賣（無可選票種）")
-        return None
-
-    ticket = _select_from_html(html)
-    if not ticket:
-        if verbose:
-            print("[REGISTER] 已開賣但沒有符合 config 條件的票")
-        return None
-
-    print(f"[REGISTER] 選中票種: id={ticket['ticket_id']} "
-          f"{ticket.get('name','')} {ticket.get('price','')} x{ticket['amount']}")
-    return OpenResult(ticket=ticket, html=html,
-                      csrf_token=parsing.extract_csrf_token(html), url=url)
-
-
-async def _diagnose(tab, slug: str):
-    """一次性診斷：確認票況資料在 fetch 到的 HTML 裡，還是只在 register_info JSON / 渲染後 DOM。"""
-    from kktix_api import BASE
-    print("[DIAG] === 票況來源診斷（只跑一次）===")
-    # 1) fetch registrations/new raw HTML
-    res = await page_fetch(tab, registration_url(slug))
-    html = res.get("text", "") if res.get("ok") else ""
-    ticket_marker = 'id="ticket_'
-    n_tickets = html.count(ticket_marker)
-    has_app = "registrationsNewApp" in html
-    print(f"[DIAG] registrations/new fetch ok={res.get('ok')} status={res.get('status')} "
-          f"len={len(html)} 有registrationsNewApp={has_app} ticket_數={n_tickets}")
-    # 2) register_info JSON（Angular 自己打的票況 API）
-    ri = await page_fetch(tab, f"{BASE}/g/events/{slug}/register_info",
-                          headers={"Accept": "application/json, text/plain, */*"})
-    if ri.get("ok"):
-        body = ri.get("text", "")
-        print(f"[DIAG] register_info status={ri.get('status')} len={len(body)} 前600字:\n{body[:600]}")
-    else:
-        print(f"[DIAG] register_info 失敗: {ri.get('error')}")
-    # 3) 渲染後 DOM 的 ticket 數（對照 raw HTML）
-    try:
-        dom_tickets = await tab.evaluate(
-            "document.querySelectorAll('[id^=\"ticket_\"]').length", return_by_value=True)
-        print(f"[DIAG] 目前分頁渲染後 DOM 的 ticket 元素數: {dom_tickets}")
-    except Exception as e:
-        print(f"[DIAG] 讀 DOM ticket 數失敗: {e!r}")
-    print("[DIAG] === 診斷結束 ===")
-
-
-async def poll_until_open(tab, slug: str,
-                          max_duration: float = 60.0, interval: float = 0.2) -> OpenResult | None:
-    """高頻 fetch 報名頁，抓到可選票立刻回傳。"""
-    await _diagnose(tab, slug)
+async def poll_until_open(tab, slug: str, catalog: list[dict], csrf: str,
+                          max_duration: float = 60.0, interval: float = 0.1) -> OpenResult | None:
+    """高頻輪詢 register_info 偵測開賣，一有符合 config 條件的票立刻回傳 OpenResult。
+    catalog / csrf 由 fetch_catalog_and_csrf 事先（倒數前）抓好傳入，這裡只跑最快的 register_info。
+    interval 預設 0.1s（實際頻率被 RTT ~130ms 綁住，等效約每 0.24s 一次）。"""
     deadline = time.monotonic() + max_duration
     attempt = 0
     while time.monotonic() < deadline:
         attempt += 1
-        # 只在前幾次印詳細狀態，避免洗版
-        result = await fetch_once(tab, slug, verbose=(attempt <= 3 or attempt % 20 == 0))
-        if result:
-            print(f"[POLL] #{attempt} 偵測到開賣 + 選到票")
-            return result
+        info = await fetch_register_info(tab, slug)
+        verbose = attempt <= 3 or attempt % 20 == 0
+        if info is None:
+            if verbose:
+                print("[REGISTER] register_info 讀取失敗")
+        elif not info["open"]:
+            if verbose:
+                print(f"[REGISTER] 尚未開賣（status={info['register_status'] or '?'}）")
+        else:
+            ticket = _select(catalog, info)
+            if ticket:
+                print(f"[POLL] #{attempt} 開賣！選中 id={ticket['ticket_id']} "
+                      f"{ticket.get('name', '')} {ticket.get('price', '')} x{ticket['amount']}")
+                return OpenResult(ticket=ticket, html="", csrf_token=csrf,
+                                  url=registration_url(slug))
+            if verbose:
+                print("[REGISTER] 已開賣但無符合 config 條件的票（目標票區可能售完）")
         await asyncio.sleep(interval)
-    print(f"[POLL] 超時 {max_duration}s（{attempt} 次）未抓到可選票")
+
+    print(f"[POLL] 超時 {max_duration}s（{attempt} 次）未搶到符合條件的票")
     return None

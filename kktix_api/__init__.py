@@ -6,8 +6,10 @@ __main__.py 只做串接 (cookie → 暖機 → 倒數 → 偵測開賣 → 下�
 
 呼叫鏈（搶票順序）：
   register.poll_until_open → reserve.reserve_ticket → browser_session.open_chrome_with_session
-  register 內部用 parsing.parse_registration_page 解析 Angular 票區，
-  parsing.select_ticket 依 config（AREA_KEYWORD / EXCLUDE / MODE / AMOUNT）挑票。
+  register 走純封包 API（不需渲染）：base_info 抓票種目錄（票名/票價）、register_info 高頻偵測
+  開賣（register_status + 每個 id 的 in_stock），兩者 merge 後 parsing.select_ticket 依 config
+  （AREA_KEYWORD / EXCLUDE / MODE / AMOUNT）挑票。
+  ⚠️ slug 要用「場次」slug（如 cb2818b8），不是「活動」slug（如 y9abe2f0＝選場次頁）。
 
 跟 tixcraftapi 一樣的鐵律：
   - 每個檔都用 `import config` + `config.XXX`，絕不 `from config import X`，

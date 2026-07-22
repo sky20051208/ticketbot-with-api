@@ -1,0 +1,37 @@
+{"eventData": {
+  "organization": {"name": "REDACTED_ORG", "public_domain": "kcentertainment.kktix.cc", "slug": "kcentertainment"},
+  "event": {
+    "id": 124839,
+    "slug": "cb2818b8",
+    "name": "【14:00場】2026 CHOI SUNG YUN FANMEETING TOUR STILL YOU & YUN in TAIPEI",
+    "event_currency": "TWD",
+    "captcha_type": 0,
+    "need_booking": true,
+    "need_mobile_verified": true,
+    "max_to_buy": 4,
+    "max_to_register_per_intent": 2,
+    "register_ttl": 180,
+    "booking_ttl": 300,
+    "start_at": "2026-08-15T06:00:00Z",
+    "arena": {"id": 5427, "name": "CORNER HOUSE", "sections": {
+      "94834": {"id": 94834, "label": "全"},
+      "94835": {"id": 94835, "label": "身障席"}
+    }}
+  },
+  "tickets": [
+    {"id": 1048265, "name": "全票", "position": 0, "min_to_buy": 1, "max_to_buy": 4, "unit_to_buy": 1,
+     "need_invitation_code": false, "disability_constraint": 0, "unlimited_capacity": true,
+     "price": {"cents": 328000, "currency": "TWD"},
+     "start_at": "2026-07-20T04:00:00Z", "end_at_for_registration": "2026-08-15T05:00:00Z"},
+    {"id": 1048275, "name": "身障席", "position": 1, "min_to_buy": 1, "max_to_buy": 2, "unit_to_buy": 1,
+     "need_invitation_code": false, "disability_constraint": 1, "unlimited_capacity": true,
+     "price": {"cents": 164000, "currency": "TWD"},
+     "start_at": "2026-07-20T04:00:00Z", "end_at_for_registration": "2026-08-15T05:00:00Z"}
+  ],
+  "stop_selling_tickets": [],
+  "contact_fields": [
+    {"default_field": "name", "field_type": "text", "is_required": true, "name": "姓名", "position": 0},
+    {"default_field": "email", "field_type": "email", "is_required": true, "name": "Email", "position": 1},
+    {"default_field": "mobile", "field_type": "text", "is_required": true, "name": "手機", "position": 2}
+  ]
+}}

@@ -1,8 +1,9 @@
 """KKTIX API 模式 entry point — `python -m kktix_api --config <path>` 啟動。
 
 架構（瀏覽器 fetch 版）：
-  開 nodriver 登入 → 保持瀏覽器開著 → 倒數 → 用頁面內 fetch 高頻偵測開賣 → fetch 送 queue
-  候位 → 導航瀏覽器到 order/報名頁讓使用者完成。
+  開 nodriver 登入 → 保持瀏覽器開著 → 倒數 → 用 base_info/register_info API 高頻偵測開賣
+  → fetch 送 queue 候位 → 導航瀏覽器到 order/報名頁讓使用者完成。
+  （票種是 Angular 前端渲染，raw HTML 拿不到，所以走 KKTIX 自己的 JSON API，見 register.py）
 
 為什麼整段跑在瀏覽器：KKTIX 在 Cloudflare 後面，把 httpOnly cookie 掏出來餵 curl_cffi 在
 這台機器上行不通（CDP getCookies 卡死、Network 事件不派發、cookie 檔 App-Bound 加密）。
@@ -67,16 +68,30 @@ async def main_async():
         print("[ERROR] 登入未完成或超時")
         return
 
+    # --- 倒數前先預抓靜態資料（票種目錄 + csrf），T-0 一到只剩最快的 register_info 輪詢 ---
+    catalog, csrf = await kk_register.fetch_catalog_and_csrf(tab, slug)
+
     # --- 倒數（TimeWatcher 是 async，直接 await）---
     if config.ENABLE_TIME_WATCHER:
         watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL)
         print(f"[TIMER] 目標時間: {config.TARGET_START_TIME}")
-        await watcher.wait_for_open_async()
+        # 倒數期間背景定期重抓 csrf + keep-alive，避免等太久 session/csrf 失效
+        holder = {"csrf": csrf}
+        keepalive = asyncio.create_task(kk_register.keep_alive_refresh(tab, slug, holder))
+        try:
+            await watcher.wait_for_open_async()
+        finally:
+            keepalive.cancel()
+            try:
+                await keepalive
+            except asyncio.CancelledError:
+                pass
+        csrf = holder["csrf"]  # 用倒數期間刷到的最新 csrf
     else:
         print("[TIMER] 定時啟動已關閉，直接開搶")
 
-    # --- fetch 高頻偵測開賣 + 選票 ---
-    result = await kk_register.poll_until_open(tab, slug)
+    # --- fetch 高頻偵測開賣 + 選票（catalog/csrf 已預抓）---
+    result = await kk_register.poll_until_open(tab, slug, catalog, csrf)
     if result is None:
         print("[FAIL] 未抓到可選票")
     else:

@@ -92,17 +92,31 @@ async def page_fetch(tab, url: str, method: str = "GET",
         opts["body"] = body
     js = (
         "(async()=>{try{"
+        "const _a=performance.now();"
         f"const r=await fetch({json.dumps(url)},{json.dumps(opts)});"
+        "const _b=performance.now();"
         "const t=await r.text();"
-        "return JSON.stringify({ok:true,status:r.status,url:r.url,text:t});"
+        "const _c=performance.now();"
+        "return JSON.stringify({ok:true,status:r.status,url:r.url,text:t,"
+        "_ttfb_ms:Math.round(_b-_a),_net_ms:Math.round(_c-_a)});"
         "}catch(e){return JSON.stringify({ok:false,error:String(e)});}})()"
     )
+    label = url.split("//", 1)[-1][:60]
+    t0 = time.perf_counter()
     try:
         raw = await asyncio.wait_for(
             tab.evaluate(js, await_promise=True, return_by_value=True), timeout=timeout)
     except Exception as e:
+        wall = round((time.perf_counter() - t0) * 1000)
+        print(f"[RTT] {method} {label}  wall={wall}ms  FAILED")
         return {"ok": False, "error": f"evaluate 失敗: {e!r}"}
+    wall = round((time.perf_counter() - t0) * 1000)
     try:
-        return json.loads(raw)
+        res = json.loads(raw)
     except Exception:
+        print(f"[RTT] {method} {label}  wall={wall}ms  非JSON")
         return {"ok": False, "error": "回傳非 JSON", "raw": str(raw)[:200]}
+    # net=純網路(TTFB) / body=含讀完 body / wall=Python端含 CDP evaluate 開銷
+    print(f"[RTT] {method} {label}  net={res.get('_ttfb_ms', '?')}ms "
+          f"body={res.get('_net_ms', '?')}ms wall={wall}ms  HTTP {res.get('status', '-')}")
+    return res

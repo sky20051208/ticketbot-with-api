@@ -5,11 +5,11 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
 
-# Tixcraft API 模式
+# 搶票核心（curl_cffi 打拓元 API；selenium 給 userdata cookie 登入 / create_profile）
 curl_cffi>=0.7
 selenium>=4.18
 
-# 瀏覽器模式（Tixcraft / KKTIX / TicketPlus）
+# KKTIX：nodriver 開瀏覽器登入 + 頁面內 fetch 搶票（kktix_api）
 nodriver>=0.40
 
 # 驗證碼辨識（自訓 CRNN+CTC ONNX，~99% acc）
@@ -20,3 +20,6 @@ Pillow>=10.0
 # 對時 + HTTP
 requests>=2.31
 ntplib>=0.4
+
+# 測試（tester subagent / 開發用；正式搶票不需要）
+pytest>=8.0
