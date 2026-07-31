@@ -18,6 +18,7 @@ worker race condition 會讓 auth dialog 跳出來。所以改走 **localhost br
 的小型轉發器，bridge 自己塞 Proxy-Authorization header 給 CliProxy，Chrome 那邊看到的只是個
 no-auth localhost proxy（見 [tixcraftapi/proxy_bridge.py](tixcraftapi/proxy_bridge.py)）。
 """
+import sys
 import time
 from urllib.parse import urlparse
 
@@ -58,6 +59,19 @@ def apply_stealth_to_options(opts: Options) -> None:
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
     opts.add_argument("--disable-blink-features=AutomationControlled")
+
+
+def apply_platform_options(opts: Options) -> None:
+    """Linux（美東 VPS）專用的 Chrome 啟動參數；Windows 完全不受影響。
+
+    Ubuntu 24.04 的 AppArmor 預設擋 unprivileged user namespace，Chrome 的沙箱起不來
+    會直接 exit（Selenium 那端只看得到 "Chrome instance exited"）。VPS 是單用途機器，
+    關掉沙箱沒有實質風險。`/dev/shm` 在雲端 VM 通常只有 64MB，不改的話 Chrome 開幾個
+    分頁就崩。
+    """
+    if sys.platform.startswith("linux"):
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
 
 
 def setup_proxy_bridge(proxy_url: str) -> int | None:
@@ -136,6 +150,7 @@ def launch_browser(user_data_dir: str, window_w: int = -1, window_h: int = -1,
         opts.add_argument(f"--window-position={window_x},{window_y}")
 
     apply_stealth_to_options(opts)
+    apply_platform_options(opts)
     apply_proxy_to_options(opts, user_data_dir, proxy_url, bind_ip)
 
     driver = webdriver.Chrome(options=opts)

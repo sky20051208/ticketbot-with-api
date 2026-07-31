@@ -39,6 +39,7 @@ def open_chrome_with_session(session, target_url: str):
 
     # proxy 透過 localhost bridge 處理 auth，不會 load extension，所以可以安全 --disable-extensions
     browser_login.apply_stealth_to_options(opts)
+    browser_login.apply_platform_options(opts)
     # 結帳頁的 Chrome 也要跟 session 走同一個出口，不然 cookie 注進去馬上被 eps 打回
     browser_login.apply_proxy_to_options(opts, tmp_dir, config.CURRENT_PROXY,
                                          config.LOCAL_BIND_IP)
