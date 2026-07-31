@@ -6,8 +6,12 @@
 
 檔案不存在 → 靜默不播。播放走 winsound（Windows 內建），非阻塞，不影響搶票。
 3 秒 debounce 避免短時間連續 403 把音效塞爆。
+
+**跑在美東 VPS 時音效沒有意義**（無音效裝置、人也不在機器旁），所以非 Windows 平台
+直接跳過不播，只留 print —— 真正的通知管道是 LINE 推播（LineBot/line_push.py）。
 """
 import os
+import sys
 import time
 
 # 專案根目錄（tixcraftapi/ 的上一層）
@@ -20,7 +24,9 @@ _DEBOUNCE_403 = 3.0  # 秒
 
 
 def _play(path: str):
-    """非阻塞播放 wav。檔案不存在/平台不支援都靜默。"""
+    """非阻塞播放 wav。檔案不存在 / 非 Windows 都靜默跳過。"""
+    if sys.platform != "win32":
+        return                      # VPS 上沒有音效裝置，print 那行就是全部的通知
     if not path or not os.path.exists(path):
         return
     try:
