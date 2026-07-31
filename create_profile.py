@@ -1,8 +1,22 @@
 """建立一個專用的 Chrome user-data-dir 給某個帳號登入用。
 
 用法:
-    python create_profile.py --name 帳號名
+    python create_profile.py --name 帳號名                       # 預設 --platform tixcraft
+    python create_profile.py --name 帳號名 --platform kktix
+    python create_profile.py --name 帳號名 --platform ticketplus
+    python create_profile.py --name 帳號名 --fixed-ip     # 同 name 每次拿同一個 IP
     python create_profile.py --name 帳號名 --proxy http://user:pass@host:port
+    python create_profile.py --name 帳號名 --url https://xxx/login   # 自訂登入頁，蓋掉 --platform
+
+--platform 決定兩件事：**開哪個登入頁**，以及 **profile 存到哪個子資料夾**
+（`chrome_profiles/<平台>/<帳號名>/`，GUI 下拉會依當前平台只列該平台的 profile）。
+可選值見下面 PLATFORM_LOGIN。同一個帳號名要在多個平台都能搶，就分別各跑一次
+（cookie 按網域分開存，互不干擾）：
+
+    python create_profile.py --name 小明 --platform tixcraft
+    python create_profile.py --name 小明 --platform ticketplus
+
+TicketPlus 沒有獨立登入頁（登入是全站共用的 dialog），會開首頁，請按右上角登入。
 
 重點：這裡用「一般 Chrome」開（subprocess 直接啟動，不經 Selenium）。
 Google 會擋 Selenium 控制的瀏覽器登入（"這個瀏覽器或應用程式可能有安全疑慮"），
@@ -13,16 +27,23 @@ Google 會擋 Selenium 控制的瀏覽器登入（"這個瀏覽器或應用程�
 看到「同一 cookie 從兩個 IP 出現」的可疑訊號。
 
 流程:
-    1. 在 chrome_profiles/帳號名/ 建一份獨立的 Chrome profile
-    2. 開一般 Chrome 視窗（含 proxy 設定，如有），自動跳到 Tixcraft 登入頁
-    3. 你手動登入 Tixcraft（Google 登入也 OK）
+    1. 在 chrome_profiles/<平台>/<帳號名>/ 建一份獨立的 Chrome profile
+    2. 開一般 Chrome 視窗（含 proxy 設定，如有），自動跳到該平台的登入頁
+    3. 你手動登入（Google / FB 登入也 OK）
     4. 關閉 Chrome 視窗 → 回 terminal 按 Enter
 
-之後 GUI 下拉選單就會看到這個帳號名，bot 用它開 Chrome 即為已登入狀態。
+之後 GUI 下拉選單（切到對應平台時）就會看到這個帳號名，bot 用它開 Chrome 即為已登入狀態。
+GUI 是在載入 / INIT 時掃 chrome_profiles/ 的，新建完要重整網頁才會出現。
 """
 import os
+import re
+import random
+import string
+import hashlib
 import argparse
 import subprocess
+
+import requests
 
 import config
 from browser_login import setup_proxy_bridge
@@ -34,6 +55,7 @@ PROFILES_DIR = os.path.join(config.BASE_DIR, "chrome_profiles")
 PLATFORM_LOGIN = {
     "tixcraft": "https://tixcraft.com/login",
     "kktix": "https://kktix.com/users/sign_in",
+    # TicketPlus 沒有獨立登入頁（登入是全站共用的 dialog），開首頁按右上角登入
     "ticketplus": "https://ticketplus.com.tw/",
 }
 
@@ -63,18 +85,50 @@ def find_chrome() -> str:
     )
 
 
-def _auto_proxy_url(name: str) -> str:
-    """ENABLE_PROXY_POOL=True 時自動從 config 建 CliProxy URL；
-    sid 用 'p-{name}'（不跟 bot 跑時的 'acc{ACC_ID}' 撞），重複跑同 name 拿同 IP。
+def _make_sid(name: str, fixed: bool) -> str:
+    """組 CliProxy 的 sid —— **sid 決定出口 IP**（同 sid = 同 IP，換 sid = 換 IP）。
 
-    注意：bot 跑時 proxy_pool 用 'acc{ACC_ID}' 當 sid，跟這裡的 'p-{name}' 不同 →
+    預設每跑一次就加一段亂數 → **每次建 profile 都是全新 IP**。這是想要的行為：
+    同一個帳號重登通常是因為上次那個 IP 被風控卡住，沿用等於再撞一次牆。
+    `--fixed-ip` 才會回到「同 name 拿同 IP」（想在同一個 IP 上重登時用）。
+
+    **坑（2026-07-26 實測）：sid 只能是英數，不能有連字號**。CliProxy 的帳號字串
+    `...-region-TW-sid-{sid}-t-90` 是拿 `-` 當 key/value 分隔，sid 裡再出現 `-` 整串就
+    解析壞掉 → 靜默退回帳號預設 IP（實測三組不同 sid 全拿到同一個 IP，看起來像換了其實沒換）。
+    中文名字也不能直接用（Basic auth 只吃 ASCII），一律先正規化，正規化後空掉就取 md5。"""
+    slug = re.sub(r"[^a-zA-Z0-9]", "", name).lower()[:12]
+    if not slug:
+        slug = hashlib.md5(name.encode("utf-8")).hexdigest()[:8]
+    if fixed:
+        return f"p{slug}"
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"p{slug}{rand}"
+
+
+def _auto_proxy_url(sid: str) -> str:
+    """ENABLE_PROXY_POOL=True 時自動從 config 建 CliProxy URL。
+
+    注意：bot 跑時 proxy_pool 用 'acc{ACC_ID}' 當 sid，跟這裡的 'p-*' 不同 →
     登入時 IP 跟搶票 IP 不會 byte-for-byte 相同，但同 CliProxy 帳號、同台灣節點，
-    risk 等級可接受。要完全一致請手動 --proxy 指定，或把 proxy_pool._build_cliproxy_url
-    改成用 profile name 而非 ACC_ID。"""
+    risk 等級可接受。要完全一致請手動 --proxy 指定。"""
     if not config.ENABLE_PROXY_POOL:
         return ""
-    user = config.CLIPROXY_USERNAME_TEMPLATE.format(acc_id=f"p-{name}")
+    user = config.CLIPROXY_USERNAME_TEMPLATE.format(acc_id=sid)
     return f"http://{user}:{config.CLIPROXY_PASSWORD}@{config.CLIPROXY_HOST}:{config.CLIPROXY_PORT}"
+
+
+def _show_exit_ip(proxy_url: str) -> str:
+    """打一次 ipify 確認這條 proxy 真的換了出口 IP（沒回報就無從確認「每次不同」）。
+    失敗只印訊息不擋流程 —— 查 IP 掛掉不代表 proxy 不能用。"""
+    try:
+        res = requests.get("https://api.ipify.org?format=json",
+                           proxies={"http": proxy_url, "https": proxy_url}, timeout=10)
+        ip = res.json().get("ip", "")
+        print(f"[PROXY] 本次出口 IP: {ip}")
+        return ip
+    except Exception as e:
+        print(f"[PROXY] 查出口 IP 失敗（不影響登入）: {type(e).__name__}: {e}")
+        return ""
 
 
 def main():
@@ -87,6 +141,8 @@ def main():
                         help="要登入哪個平台（決定開哪個登入頁）；同一 profile 可分別跑多次各平台都登")
     parser.add_argument("--url", default="",
                         help="自訂登入起始 URL（覆蓋 --platform）")
+    parser.add_argument("--fixed-ip", action="store_true",
+                        help="同一個 --name 每次都拿同一個 proxy IP（預設每次跑都換新 IP）")
     args = parser.parse_args()
 
     login_url = args.url or PLATFORM_LOGIN[args.platform]
@@ -108,7 +164,14 @@ def main():
         "--disable-blink-features=AutomationControlled",  # 保險旗標；一般 Chrome 本來就沒有這個標記
     ]
     # --proxy 明確指定優先；否則 ENABLE_PROXY_POOL=True 自動從 config 建
-    proxy_url = args.proxy or _auto_proxy_url(args.name)
+    if args.proxy:
+        proxy_url = args.proxy
+    else:
+        sid = _make_sid(args.name, args.fixed_ip)
+        proxy_url = _auto_proxy_url(sid)
+        if proxy_url:
+            print(f"[PROXY] sid={sid}" + ("（--fixed-ip：同 name 固定同 IP）" if args.fixed_ip
+                                          else "（每次執行都換新 IP）"))
     proxy_applied = False
     if proxy_url:
         local_port = setup_proxy_bridge(proxy_url)
@@ -116,6 +179,7 @@ def main():
             cmd.append(f"--proxy-server=http://127.0.0.1:{local_port}")
             cmd.append("--webrtc-ip-handling-policy=disable_non_proxied_udp")
             proxy_applied = True
+            _show_exit_ip(proxy_url)
 
     # 有用 proxy 時先開首頁暖機，不直衝登入頁（見 PLATFORM_HOME 說明）；
     # 直連沒有「陌生 IP」問題，維持原本直接開登入頁的行為。
@@ -133,7 +197,7 @@ def main():
         print("  2. 在該頁完成登入（Google/Facebook 登入都可以）")
         print("     若還是跳出 reCAPTCHA，手動勾選/選圖完成即可，屬正常驗證，")
         print("     不代表失敗；只有「怎麼解都卡住」才是這組代理 IP 風評不好，")
-        print("     可以換個 --name 拿新的 sid 重試")
+        print("     直接同一行指令重跑一次就會換一個新 IP")
         print("  3. 登入完成後，關閉那個 Chrome 視窗")
         print("  4. 回到這裡按 Enter")
     else:

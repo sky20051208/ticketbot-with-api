@@ -14,6 +14,31 @@ import socket
 import threading
 
 
+def pipe_both(a: socket.socket, b: socket.socket):
+    """雙向轉發直到任一邊斷。給 LocalProxyBridge 和 bind_proxy.BindingProxy 共用。"""
+    def copy(src: socket.socket, dst: socket.socket):
+        try:
+            while True:
+                data = src.recv(16384)
+                if not data:
+                    break
+                dst.sendall(data)
+        except Exception:
+            pass
+        finally:
+            try:
+                dst.shutdown(socket.SHUT_WR)
+            except Exception:
+                pass
+
+    t1 = threading.Thread(target=copy, args=(a, b), daemon=True)
+    t2 = threading.Thread(target=copy, args=(b, a), daemon=True)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+
 class LocalProxyBridge:
     """單一上游 proxy + 認證的 localhost forwarder。
 
@@ -103,7 +128,7 @@ class LocalProxyBridge:
             upstream.sendall(modified)
 
             # 雙向 pipe 直到任一邊斷
-            self._pipe(client, upstream)
+            pipe_both(client, upstream)
         except Exception:
             pass
         finally:
@@ -113,27 +138,3 @@ class LocalProxyBridge:
                         s.close()
                     except Exception:
                         pass
-
-    @staticmethod
-    def _pipe(a: socket.socket, b: socket.socket):
-        def copy(src: socket.socket, dst: socket.socket):
-            try:
-                while True:
-                    data = src.recv(16384)
-                    if not data:
-                        break
-                    dst.sendall(data)
-            except Exception:
-                pass
-            finally:
-                try:
-                    dst.shutdown(socket.SHUT_WR)
-                except Exception:
-                    pass
-
-        t1 = threading.Thread(target=copy, args=(a, b), daemon=True)
-        t2 = threading.Thread(target=copy, args=(b, a), daemon=True)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()

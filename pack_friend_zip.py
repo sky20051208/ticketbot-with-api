@@ -16,8 +16,6 @@ PREFIX = "TicketBot_朋友版/"
 
 # runtime 必要：朋友拿到後 `setup.bat → start.bat` 就能跑
 FILES = [
-    "main.py",
-    "bot.py",
     "browser_login.py",
     "config.py",
     "create_profile.bat",
@@ -38,9 +36,8 @@ FILES = [
 
 # 整個目錄打包（會自動排除 __pycache__）
 DIRS = [
-    "tixcraftapi",      # API 模式整套（含 state.py / runner.py FSM / alerts.py）
-    "kktix",
-    "ticketplus",
+    "tixcraftapi",      # 拓元整套（含 state.py / runner.py FSM / alerts.py）
+    "kktix_api",        # KKTIX 整套（nodriver 登入 + 頁內 fetch 搶票）
     "webgui/static",
     "sounds",           # 音效檔（朋友放自己的 403.wav / checkout.wav 進來）
     "LineBot",          # 本機推播（line_push.py）+ rich menu 設定（setup_richmenu.py）

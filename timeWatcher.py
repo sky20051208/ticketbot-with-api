@@ -148,7 +148,11 @@ class TimeWatcher:
             print("❌ 時間格式錯誤！請使用 HH:MM:SS")
             sys.exit(1)
 
-    async def wait_for_open_async(self):
+    async def wait_for_open_async(self, on_tick=None):
+        """on_tick: 每輪倒數呼叫一次 `on_tick(remaining_seconds)`，**跑在主執行緒上**。
+        用途是讓呼叫端在倒數期間 ping 自己的連線（curl_cffi 連線池是 thread-local，
+        背景 keep-alive thread 暖不到主執行緒這條，見 tixcraftapi/session.py 說明）。
+        callback 自己控制頻率、自己吞例外；這裡只保證不讓它把倒數搞爆。"""
         print(f"⏳ 正在與 utimetool.com 對時 (強制轉 GMT+8)...")
         
         # 1. 取得絕對準確的台北時間
@@ -177,6 +181,12 @@ class TimeWatcher:
             if remaining <= 0.9:
                 print("\n⚡⚡⚡ 時間到！啟動瀏覽器搶票！ ⚡⚡⚡")
                 return True
+
+            if on_tick is not None:
+                try:
+                    on_tick(remaining)
+                except Exception as e:
+                    print(f"[TIMER] on_tick 異常（忽略）: {type(e).__name__}: {e}")
             
             # --- 定期校正邏輯 ---
             time_since_sync = now - last_sync_time

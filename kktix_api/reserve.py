@@ -77,12 +77,17 @@ async def join_queue(tab, slug: str, result: OpenResult) -> str | None:
 
 
 async def redeem_queue(tab, slug: str, token: str,
-                       max_wait: float = 120.0, interval: float = 0.2) -> str | None:
-    """拿候位 token 輪詢兌換 report id（to_param）。
+                       max_wait: float = 120.0, interval: float = 0.2) -> tuple[str | None, bool]:
+    """拿候位 token 輪詢兌換 report id（to_param）。回 (to_param, fatal)。
 
     候位 token 不是拿到就能兌換 —— 要一直 GET queue/token/{token}，還沒輪到會回
     {"result":"not_found"}，輪到才回 {"to_param":"..."}。T-0 大排隊時可能要等一陣子。
-    回 to_param 或 None（超時）。"""
+
+    redeem 語意（逆向 waitForRegistration + 真實 alert 字串驗證）：
+      - to_param 有值            → 成功
+      - message 且屬售完類        → 軟失敗（回 None, fatal=False）→ 清票迴圈繼續等回流
+      - message 且非售完（資格等） → 硬失敗（回 None, fatal=True）→ 重試無用，該停
+      - 逾時                      → 軟失敗（None, False）"""
     url = f"{QUEUE_BASE}/queue/token/{token}"
     deadline = time.monotonic() + max_wait
     attempt = 0
@@ -90,18 +95,23 @@ async def redeem_queue(tab, slug: str, token: str,
         attempt += 1
         res = await page_fetch(tab, url, headers={"Accept": "application/json, text/plain, */*"})
         if res.get("ok") and res.get("status") == 200:
-            text = res.get("text", "")
-            to_param = parsing.parse_redeem_to_param(text)
-            if to_param:
-                print(f"[RESERVE] ✅ redeem 取得報名 id: {to_param}（第 {attempt} 次）")
-                return to_param
+            r = parsing.parse_redeem_result(res.get("text", ""))
+            if r["to_param"]:
+                print(f"[RESERVE] ✅ redeem 取得報名 id: {r['to_param']}（第 {attempt} 次）")
+                return r["to_param"], False
+            if r["message"]:
+                if parsing.redeem_message_is_soldout(r["message"]):
+                    print(f"[RESERVE] 售完（繼續清票）：{r['message']}")
+                    return None, False
+                print(f"[RESERVE] ❌ 硬失敗（停止清票，重試無用）：{r['message']}")
+                return None, True
             if attempt <= 3 or attempt % 20 == 0:
-                print(f"[RESERVE] 候位中，尚未輪到...（{text[:80]}）")
+                print(f"[RESERVE] 候位中，尚未輪到...（{(res.get('text') or '')[:80]}）")
         elif attempt <= 3:
             print(f"[RESERVE] redeem HTTP {res.get('status')}，重試")
         await asyncio.sleep(interval)
     print(f"[RESERVE] redeem 超時 {max_wait}s（{attempt} 次）未輪到")
-    return None
+    return None, False
 
 
 async def confirm_booking(tab, slug: str, to_param: str, csrf_token: str) -> bool:
@@ -122,15 +132,17 @@ async def confirm_booking(tab, slug: str, to_param: str, csrf_token: str) -> boo
     return True
 
 
-async def reserve_ticket(tab, slug: str, result: OpenResult) -> str | None:
-    """完整下單：候位 → redeem → confirm_booking。回 order URL 或 None（fallback 瀏覽器交棒）。"""
+async def reserve_ticket(tab, slug: str, result: OpenResult) -> tuple[str | None, bool]:
+    """完整下單：候位 → redeem → confirm_booking。回 (order_url, fatal)。
+    fatal=True 表示硬失敗（如資格不符）重試無用，清票迴圈該停；
+    fatal=False + order_url None = 軟失敗（售完 / 逾時 / 被搶走），該繼續清票。"""
     token = await join_queue(tab, slug, result)
     if not token:
-        return None
-    to_param = await redeem_queue(tab, slug, token)
+        return None, False  # join_queue 失敗（售完 403 / csrf 過期）→ 軟，繼續清票
+    to_param, fatal = await redeem_queue(tab, slug, token)
     if not to_param:
-        return None
+        return None, fatal
     await confirm_booking(tab, slug, to_param, result.csrf_token)  # 失敗不致命
     order_url = f"{BASE}/events/{slug}/registrations/{to_param}#/booking"
     print(f"[RESERVE] ✅ order 頁: {order_url}")
-    return order_url
+    return order_url, False

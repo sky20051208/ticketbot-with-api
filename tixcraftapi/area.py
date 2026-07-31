@@ -14,28 +14,36 @@ from tixcraftapi.parsing import parse_area_availables
 
 def select_area(session: cf_requests.Session, area_url: str, headers: dict,
                 area_keyword: str = "", exclude_keyword: str = "",
-                strategy: str = "") -> str | None:
+                strategy: str = "", prefetched_html: str | None = None) -> str | None:
     """從 area 頁面挑區。回傳值三態：
       - ticket_url（選區成功 → classify 成 TICKET）
       - redirect 落點 URL（被導去 verify / 其他頁 → classify 決定下一步）
       - None（沒票 / 失敗 → runner fallback GAME）
+
+    prefetched_html：T-0 的 polling 直接打中 area 頁時會把 HTML 帶回來，
+    這裡就不用再 GET 一次（省掉開賣瞬間最貴的一發，實測 3~4 秒）。
     """
-    res = session.get(area_url, headers={**headers, "Referer": area_url},
-                      allow_redirects=False, timeout=10)
+    if prefetched_html is not None:
+        print("[AREA] 用 polling 已抓到的頁面，跳過 GET")
+        html = prefetched_html
+    else:
+        res = session.get(area_url, headers={**headers, "Referer": area_url},
+                          allow_redirects=False, timeout=10)
 
-    # 被 redirect（驗證頁、活動頁…）→ 不在這裡判斷語意，交回 FSM
-    if res.status_code in (301, 302):
-        loc = res.headers.get("Location", "")
-        full_loc = loc if loc.startswith("http") else BASE + loc
-        print(f"[AREA] 被導向: {full_loc}（交回 FSM 分類）")
-        return full_loc
+        # 被 redirect（驗證頁、活動頁…）→ 不在這裡判斷語意，交回 FSM
+        if res.status_code in (301, 302):
+            loc = res.headers.get("Location", "")
+            full_loc = loc if loc.startswith("http") else BASE + loc
+            print(f"[AREA] 被導向: {full_loc}（交回 FSM 分類）")
+            return full_loc
 
-    raise_if_blocked(res, "AREA")
-    if res.status_code != 200:
-        print(f"[AREA] HTTP {res.status_code}")
-        return None
+        raise_if_blocked(res, "AREA")
+        if res.status_code != 200:
+            print(f"[AREA] HTTP {res.status_code}")
+            return None
+        html = res.text
 
-    available = parse_area_availables(res.text)
+    available = parse_area_availables(html)
     if available is None:
         print("[AREA] 無可購買區域（全部售完或尚未開賣）")
         return None

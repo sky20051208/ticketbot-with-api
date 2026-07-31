@@ -25,8 +25,10 @@ from LineBot import line_push
 from timeWatcher import TimeWatcher
 
 from tixcraftapi import BASE
-from tixcraftapi.session import build_session, build_headers, warmup_session, keep_alive_loop
+from tixcraftapi.session import (build_session, build_headers, warmup_session,
+                                 keep_alive_loop, WarmPool)
 from tixcraftapi.game import poll_until_open
+from tixcraftapi.parsing import parse_game_keys
 from tixcraftapi.state import State
 from tixcraftapi.runner import Context, run
 from tixcraftapi.finalize import open_chrome_with_session
@@ -50,10 +52,66 @@ def load_config_override():
         print("[CONFIG] 使用預設 config.py")
 
 
-def wait_until_start(target_time_str: str):
-    """精準計時器（網路對時）— TimeWatcher 內部處理 NTP / 拓元 server time。"""
+def wait_until_start(target_time_str: str, on_tick=None):
+    """精準計時器（網路對時）— TimeWatcher 內部處理 NTP / 拓元 server time。
+    on_tick 每輪倒數在**主執行緒**呼叫一次（用來 ping 主執行緒自己的連線）。"""
     watcher = TimeWatcher(target_time_str, config.TIME_WATCH_URL)
-    asyncio.run(watcher.wait_for_open_async())
+    asyncio.run(watcher.wait_for_open_async(on_tick=on_tick))
+
+
+def prefetch_area_urls(session, slug: str, date_keyword: str = "") -> list[str]:
+    """開賣前先打一次 game 頁，用 `data-key` 組出各場次的 area URL。
+
+    拓元在**開賣前**就會把場次列印出來（有 data-key、還沒有 data-href），所以倒數階段
+    就能算出 `/ticket/area/{slug}/{key}`，T-0 直接拿去 poll —— 一旦命中，那份 HTML 就是
+    AREA 步驟要的東西，整個 AREA GET 省掉。抓不到就回空 list，polling 退回只看 game 頁。"""
+    url = f"{BASE}/activity/game/{slug}"
+    try:
+        res = session.get(url, headers=build_headers(
+            referer=f"{BASE}/activity/detail/{slug}"), timeout=10)
+        if res.status_code != 200:
+            print(f"[PREOPEN] game 頁 HTTP {res.status_code}，跳過 area URL 預測")
+            return []
+        keys = parse_game_keys(res.text, date_keyword)
+    except Exception as e:
+        print(f"[PREOPEN] 抓 data-key 失敗（不致命）: {type(e).__name__}: {e}")
+        return []
+    if not keys:
+        print("[PREOPEN] 頁面沒有 data-key，T-0 只 poll game 頁")
+        return []
+    hints = [f"{BASE}/ticket/area/{slug}/{k}" for k in keys[:2]]   # 最多 2 個，控制請求量
+    print(f"[PREOPEN] 預測 area URL: {hints}")
+    return hints
+
+
+def make_main_thread_keepalive(session, slug: str, interval: float = 15.0,
+                               stop_before: float = 20.0):
+    """回傳給 TimeWatcher 每輪呼叫的 callback：在**主執行緒**上定期 ping。
+
+    為什麼非要主執行緒自己打：curl_cffi 的連線池是 thread-local，背景 keep-alive
+    thread 暖的是它自己那條，暖不到主執行緒 —— 而 T-0 第一發 POLL 正是主執行緒打的。
+    不補這一刀，開賣瞬間第一發永遠在付重新握手的錢（實測走 proxy 貴 0.5~3 秒）。
+
+    最後 stop_before 秒停手，不讓網路 IO 影響倒數精度。"""
+    target = f"{BASE}/activity/game/{slug}" if slug else f"{BASE}/"
+    headers = build_headers()
+    state = {"last": 0.0}
+
+    def _tick(remaining: float):
+        if remaining <= stop_before:
+            return
+        now = time.monotonic()
+        if now - state["last"] < interval:
+            return
+        state["last"] = now
+        t0 = time.monotonic()
+        try:
+            session.get(target, headers=headers, timeout=5)
+            print(f"[KEEPALIVE] 主執行緒連線續命 RTT {(time.monotonic() - t0) * 1000:.0f}ms")
+        except Exception as e:
+            print(f"[KEEPALIVE] 主執行緒 ping 失敗: {type(e).__name__}: {e}")
+
+    return _tick
 
 
 def wait_until_t_minus(target_time_str: str, t_minus_seconds: float = 300.0):
@@ -126,6 +184,7 @@ def main():
             window_w=config.WINDOW_W, window_h=config.WINDOW_H,
             window_x=config.WINDOW_X, window_y=config.WINDOW_Y,
             proxy_url=config.CURRENT_PROXY,  # "" 時 Chrome 直連，不影響本機網路
+            bind_ip=config.LOCAL_BIND_IP,    # 要跟 build_session 綁同一顆，否則 eps_sid 作廢
         )
         if not browser_login.wait_for_login(login_driver, start_url=config.LIVENATION_START_URL):
             print("[ERROR] 登入未完成或超時")
@@ -149,41 +208,57 @@ def main():
             wait_until_t_minus(config.TARGET_START_TIME, 300)
         proxy_pool.acquire()
 
-    session = build_session(config.COOKIE)
+    session = build_session(config.COOKIE, local_ip=config.LOCAL_BIND_IP)
     warmup_session(session, slug=config.ACTIVITY_SLUG)
 
+    # 並行請求專用的常駐熱連線（captcha prefetch / submit 並行抓圖都走它）。
+    # 現在就建起來，倒數期間跟主執行緒一起被 ping，T-0 時每條連線都是熱的。
+    pool = WarmPool(session, slug=config.ACTIVITY_SLUG, size=2)
+    pool.warm()
+
+    # 開賣前先撈場次 id（data-key，開賣前就看得到）→ 預先組出 area URL，
+    # T-0 就能直接 poll 選區頁；命中的話那份 HTML 直接拿來選區，省掉 AREA 一整發 GET。
+    area_hints = prefetch_area_urls(session, config.ACTIVITY_SLUG, config.DATE_KEYWORD)
+
     # 定時等待（可由 config 關閉，關閉後直接開搶）
-    first_area_url: str | None = None
+    poll_result = None
     if config.ENABLE_TIME_WATCHER:
         ka_stop = threading.Event()
         ka_thread = threading.Thread(
             target=keep_alive_loop,
-            args=(session, ka_stop, config.ACTIVITY_SLUG),
+            args=(session, ka_stop, config.ACTIVITY_SLUG, 15.0, pool),
             daemon=True,
         )
         ka_thread.start()
-        print("[KEEPALIVE] 背景 ping 已啟動")
+        print("[KEEPALIVE] 背景 ping 已啟動（含 pool 連線續命）")
         try:
-            wait_until_start(config.TARGET_START_TIME)
+            wait_until_start(
+                config.TARGET_START_TIME,
+                on_tick=make_main_thread_keepalive(session, config.ACTIVITY_SLUG),
+            )
         finally:
             ka_stop.set()
 
-        # T-0 後高頻 polling 抓開賣瞬間
-        first_area_url = poll_until_open(
+        # T-0 後高頻 polling 抓開賣瞬間（GAME 頁 + 預測的 area 頁同時偵測）
+        poll_result = poll_until_open(
             session, config.ACTIVITY_SLUG,
             build_headers(referer=f"{BASE}/activity/detail/{config.ACTIVITY_SLUG}"),
             date_keyword=config.DATE_KEYWORD,
+            area_url_hints=area_hints,
+            pool=pool,
         )
     else:
         print("[TIMER] 定時啟動已關閉，直接開搶")
 
     # --- 進 FSM ---
     # 若 polling 階段已拿到 area_url，把它塞進 ctx 並從 AREA state 開始；否則從 GAME 開始
-    ctx = Context(session=session, slug=config.ACTIVITY_SLUG)
-    if first_area_url:
-        ctx.area_url = first_area_url
+    ctx = Context(session=session, slug=config.ACTIVITY_SLUG, pool=pool)
+    if poll_result:
+        ctx.area_url = poll_result.area_url
+        ctx.area_html = poll_result.area_html   # 有值 → AREA 步驟直接用，不再 GET
         initial_state = State.AREA
-        print(f"[GAME] 沿用 polling 拿到的場次: {first_area_url}")
+        hint = "（含頁面，省一發 GET）" if poll_result.area_html else ""
+        print(f"[GAME] 沿用 polling 拿到的場次{hint}: {poll_result.area_url}")
     else:
         initial_state = State.GAME
 

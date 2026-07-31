@@ -4,11 +4,10 @@
 #   cp config.py.example config.py       (macOS/Linux)
 #
 # config.py 本身已加進 .gitignore，不會被 git 追蹤，改動只留在本機。
-from selenium.webdriver.common.by import By
 import os
 
 # --- 平台選擇 ---
-# "TIXCRAFT" = 拓元售票 | "KKTIX" = KKTIX | "TICKETPLUS" = 遠大售票
+# "TIXCRAFT" = 拓元售票 | "KKTIX" = KKTIX
 PLATFORM = "TIXCRAFT"
 
 # --- 帳號 ---
@@ -37,7 +36,7 @@ LIVENATION_START_URL = ""
 ENABLE_TIME_WATCHER = False       # 是否啟用定時等待
 TARGET_START_TIME = "12:00:00"   # 目標開賣時間 HH:MM:SS
 ADVANCE_MS = 150                 # 提前毫秒數
-TIME_WATCH_URL = ""              # 監控網址（瀏覽器模式用）
+TIME_WATCH_URL = ""              # 監控網址（定時對時用）
 
 # --- 視窗平鋪 (GUI 多開時覆寫) ---
 ACC_ID = 0
@@ -75,23 +74,13 @@ CLIPROXY_USERNAME_TEMPLATE = ""                  # 例 "your_account-region-TW-s
 CLIPROXY_PASSWORD = ""
 CURRENT_PROXY = ""                               # 執行期由 proxy_pool.acquire() 寫入
 
+# --- 多 IP 出口（美國 VPS 專用，取代 proxy 做多開隔離）---
+# 拓元 origin 在美東，Oracle Ashburn 直連約 60ms（家裡走 CliProxy 是 331ms）。多開時
+# 不用 proxy 換 IP，改成一台機器掛多顆公網 IP，每個 instance 綁一顆自己的次要私有 IP。
+# 填 OCI VNIC 上的**次要私有 IP**（例 "10.0.0.88"），空字串 = 走預設路由（主 IP）。
+# curl_cffi 和 Chrome 都會綁這顆 —— 兩邊必須一致，因為 eps_sid 綁發放時的出口 IP。
+# 機器上要先掛好：rotate_ips.py --sync-os（開機由 systemd 自動跑）
+LOCAL_BIND_IP = ""
+
 # --- 系統路徑 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-class Selector:
-    COOKIE_ACCEPT_BTN = (By.ID, "onetrust-accept-btn-handler")
-    BUY_TICKET_BTN_SELECTOR = (By.CSS_SELECTOR, 'a[target="_new"]')
-    BUY_TICKET_BTN_TEXT = "立即購票"
-    ORDER_BTN = (By.CSS_SELECTOR, 'button.btn.btn-primary.text-bold.m-0')
-    TICKET_PRICE_SELECT = (By.ID, "TicketForm_ticketPrice_01")
-    TICKET_AREA_A = (By.CLASS_NAME, "select_form_a")
-    TICKET_AREA_B = (By.CLASS_NAME, "select_form_b")
-    QUANTITY_DROPDOWN = (By.CSS_SELECTOR, '.mobile-select')
-    AGREEMENT_CHECKBOX = (By.CLASS_NAME, "form-check-input")
-    CONFIRM_NEXT_BTN = (By.XPATH, '//*[@id="form-ticket-ticket"]/div[4]/button[2]')
-    CAPTCHA_IMAGE = (By.ID, "TicketForm_verifyCode-image")
-    CAPTCHA_INPUT = (By.ID, "TicketForm_verifyCode")
-    CONFIRM_PURCHASE = (By.CSS_SELECTOR, 'button[type="submit"]')
-    VERIFY_INPUT = (By.ID, "checkCode")
-    VERIFY_BTN = (By.CLASS_NAME, "btn-primary")

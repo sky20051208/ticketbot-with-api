@@ -89,10 +89,17 @@ class TestSelectTicket:
         chosen = parsing.select_ticket(units, keyword="貴賓", exclude="", mode="關鍵字優先", amount=1)
         assert chosen["ticket_id"] == "1"  # 找不到關鍵字 → 退回第一個有票的
 
-    def test_non_priority_mode_no_match_returns_none(self):
+    def test_non_priority_mode_no_match_falls_back(self):
+        # 關鍵字是偏好不是硬篩選：由上而下 + 沒命中的關鍵字 → 退回全部有票的，不回 None
         units = [_unit("1", name="搖滾區")]
         chosen = parsing.select_ticket(units, keyword="貴賓", exclude="", mode="由上而下", amount=1)
-        assert chosen is None  # 硬篩選，沒中就 None
+        assert chosen["ticket_id"] == "1"
+
+    def test_random_mode_ignores_nonmatching_keyword(self):
+        # 使用者情境：選「隨機」但關鍵字欄留了字（沒命中）→ 仍隨機抓一張有票的
+        units = [_unit("1", name="搖滾區"), _unit("2", name="看台區")]
+        chosen = parsing.select_ticket(units, keyword="不存在的字", exclude="", mode="隨機", amount=1)
+        assert chosen is not None and chosen["ticket_id"] in {"1", "2"}
 
     def test_exclude_filters(self):
         units = [_unit("1", name="身障席"), _unit("2", name="搖滾區")]
@@ -237,3 +244,72 @@ class TestRedeemParse:
 
     def test_bad_json(self):
         assert parsing.parse_redeem_to_param("nope") == ""
+
+
+# --------- 開賣判定：合成 JSON、確定性斷言 open=True/False ---------
+
+def _regjson(status, tickets):
+    import json
+    return json.dumps({"register_status": status, "tickets": tickets, "sections": []})
+
+
+class TestOpenDetection:
+    """開賣判定只認 register_status==IN_STOCK。用固定 JSON 直接斷言，不打真實活動
+    （真實活動狀態會變）。守著 2026-07 實測 tanya26 抓到的坑。"""
+
+    def test_coming_soon_is_not_open_even_if_in_stock_true(self):
+        # ★ 關鍵回歸：KKTIX 開賣前(COMING_SOON)就把 in_stock 標 true(upper_bound=0)，
+        #   不能被騙成 open，否則開賣前狂送 join_queue → 403 EVENT_NOT_YET_START。
+        js = _regjson("COMING_SOON", [{"id": 1, "in_stock": True, "upper_bound": 0}])
+        info = parsing.parse_register_info(js)
+        assert info["open"] is False
+        assert info["in_stock_ids"] == {"1"}  # id 照抓，只是還不算開
+
+    def test_in_stock_is_open(self):
+        js = _regjson("IN_STOCK", [{"id": 1, "in_stock": True, "upper_bound": 7}])
+        assert parsing.parse_register_info(js)["open"] is True
+
+    def test_sold_out_is_not_open(self):
+        import json
+        js = json.dumps({"register_status": "SOLD_OUT", "tickets": None, "sections": []})
+        assert parsing.parse_register_info(js)["open"] is False
+
+    @pytest.mark.parametrize("status", ["REGISTRATION_CLOSED", "CLOSED", "PENDING", ""])
+    def test_other_statuses_not_open(self, status):
+        assert parsing.parse_register_info(_regjson(status, []))["open"] is False
+
+
+class TestRedeemMessageClass:
+    """redeem message 分「售完(軟，繼續清票)」vs「資格不符(硬，停止)」。真實 alert 字串。"""
+
+    @pytest.mark.parametrize("msg", ["票券已全部售出", "目前沒有可以購買的票券。"])
+    def test_soldout_is_soft(self, msg):
+        assert parsing.redeem_message_is_soldout(msg) is True
+
+    def test_qualification_is_fatal(self):
+        assert parsing.redeem_message_is_soldout(
+            "非 KKTIX 身心障礙身份認證會員，不可選購票種 身障票(輪椅席)") is False
+
+    def test_parse_redeem_result_message(self):
+        r = parsing.parse_redeem_result('{"message":"票券已全部售出"}')
+        assert r["to_param"] == "" and r["message"] == "票券已全部售出"
+
+
+class TestCatalogFallback:
+    """base_info catalog 空 → merge 退 register_info fallback；stop_selling_tickets 也進目錄。"""
+
+    def test_merge_fallback_without_catalog(self):
+        reg = parsing.parse_register_info(_regjson("IN_STOCK",
+              [{"id": 5, "in_stock": True, "name": "搖滾區"}, {"id": 6, "in_stock": False}]))
+        sel = [u for u in parsing.merge_availability([], reg) if u["selectable"]]
+        assert [u["ticket_id"] for u in sel] == ["5"]
+
+    def test_base_info_includes_stop_selling(self):
+        import json
+        catalog = parsing.parse_base_info(json.dumps({"eventData": {
+            "tickets": [],
+            "stop_selling_tickets": [
+                {"id": 9, "name": "全票", "price": {"cents": 100000, "currency": "TWD"}}],
+        }}))
+        assert [c["ticket_id"] for c in catalog] == ["9"]
+        assert catalog[0]["name"] == "全票"

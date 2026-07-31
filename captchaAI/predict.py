@@ -3,13 +3,10 @@
 對外接口（沿用舊版，呼叫端不用改）：
   recognize_captcha(bytes) -> str         返回 4 字小寫英文（失敗回 ""）
   warmup_ocr() -> None                    提前載 + 跑一張暖機
-  solve_captcha_nodriver(tab) -> str      瀏覽器模式：從 nodriver tab 抓圖辨識（async）
-  get_captcha_base64_nodriver(tab) -> bytes | None
-  CAPTCHA_IMAGE_ID                        captcha 圖片 DOM ID（bot.py 也用）
+  CAPTCHA_IMAGE_ID                        captcha 圖片 DOM ID
 
 底層：onnxruntime + captchaAI/tixcraft_ocr.onnx（自 train.py 訓出）。
 """
-import base64
 import io
 import time
 from pathlib import Path
@@ -39,9 +36,16 @@ def _get_session() -> ort.InferenceSession:
                 f"找不到 ONNX model: {_MODEL_PATH}\n"
                 f"先跑 `python -m captchaAI.train` 訓練。"
             )
-        # CPU EP 對 captcha 推論 <5ms，省 GPU memory
+        # CPU EP 對 captcha 推論 <5ms，省 GPU memory。
+        # **執行緒鎖 1**：onnxruntime 預設每個 session 開「實體核心數」條 intra-op thread，
+        # 但每個搶票 instance 是獨立 process、各自一份 session —— 15 開就會變成
+        # 15 × N 條執行緒搶同幾顆核心，剛好在 T-0 那一秒全部同時要 OCR。
+        # 單張圖本來就跑不滿一核，鎖 1 反而更快也更可預測。
+        _OPTS = ort.SessionOptions()
+        _OPTS.intra_op_num_threads = 1
+        _OPTS.inter_op_num_threads = 1
         _SESSION = ort.InferenceSession(
-            str(_MODEL_PATH), providers=["CPUExecutionProvider"]
+            str(_MODEL_PATH), sess_options=_OPTS, providers=["CPUExecutionProvider"]
         )
         print(f"[OK] 拓元 OCR 已載入 ({_MODEL_PATH.name})")
     return _SESSION
@@ -165,40 +169,3 @@ def warmup_ocr() -> None:
         print(f"[OK] OCR 引擎已暖機 ({(time.perf_counter() - t0) * 1000:.0f}ms)")
     except Exception as e:
         print(f"[WARN] OCR 暖機失敗（不致命）: {e}")
-
-
-# ---------- nodriver / 瀏覽器模式抓圖介面 (bot.py 用) ----------
-
-async def get_captcha_base64_nodriver(tab) -> Optional[bytes]:
-    """從 nodriver tab 把 captcha img 畫到 canvas、回 PNG bytes。"""
-    js_script = f"""
-    (async function() {{
-        var img = document.getElementById('{CAPTCHA_IMAGE_ID}');
-        if (!img) return null;
-        if (!img.complete || img.naturalWidth === 0) {{
-            await new Promise(r => img.onload = r);
-        }}
-        var canvas = document.createElement('canvas');
-        var context = canvas.getContext('2d');
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        context.drawImage(img, 0, 0);
-        var dataURL = canvas.toDataURL('image/png');
-        return dataURL.split(',')[1];
-    }})()
-    """
-    try:
-        base64_str = await tab.evaluate(js_script, await_promise=True)
-        if base64_str:
-            return base64.b64decode(base64_str)
-    except Exception:
-        pass
-    return None
-
-
-async def solve_captcha_nodriver(tab) -> str:
-    image_data = await get_captcha_base64_nodriver(tab)
-    if not image_data:
-        return ""
-    captcha_text = recognize_captcha(image_data)
-    return captcha_text.strip().replace(" ", "") if captcha_text else ""

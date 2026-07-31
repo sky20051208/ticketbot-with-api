@@ -22,6 +22,27 @@ def has_area_button(html: str) -> bool:
     return bool(_GAME_BTN_RE.search(html))
 
 
+def parse_game_keys(html: str, date_keyword: str = "") -> list[str]:
+    """從 game 頁抽場次 id（`data-key`）。**開賣前就抓得到**（那時還沒有 data-href），
+    拿來預先組出 area URL `/ticket/area/{slug}/{key}`，T-0 就能直接 poll 選區頁。
+    date_keyword 過濾方式跟 parse_game_area_url 一致（比對整列 HTML）。"""
+    keys: list[str] = []
+    rows = re.findall(r'<tr[^>]*class="gridc[^"]*"[^>]*>(.*?)</tr>', html, re.DOTALL)
+    for row_html in rows:
+        if date_keyword and date_keyword not in row_html:
+            continue
+        m = re.search(r'data-key=["\']([^"\']+)["\']', row_html)
+        if m and m.group(1) not in keys:
+            keys.append(m.group(1))
+    if keys:
+        return keys
+    # 沒有 gridc 列時（版型不同）退回全頁掃
+    for k in re.findall(r'data-key=["\']([^"\']+)["\']', html):
+        if k not in keys:
+            keys.append(k)
+    return keys
+
+
 def parse_game_area_url(html: str, date_keyword: str = "") -> str | None:
     """從 game page HTML 抽 area URL；找不到回 None。"""
     rows = re.findall(

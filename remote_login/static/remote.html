@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>登入</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: #111; color: #eee;
+    font-family: system-ui, "Noto Sans TC", sans-serif; overflow: hidden; }
+  #bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    background: #1b1b1b; border-bottom: 1px solid #333; }
+  #bar #st { flex: 1; font-size: 13px; color: #9ad; }
+  button { border: 0; border-radius: 8px; padding: 9px 12px; font-size: 14px;
+    font-weight: 600; color: #fff; background: #2d6cdf; }
+  button.gray { background: #444; }
+  button.green { background: #2ea043; }
+  #wrap { display: flex; justify-content: center; align-items: flex-start;
+    height: calc(100% - 50px); background: #000; }
+  canvas { display: block; touch-action: none; background: #fff; }
+  /* 隱形輸入框：用 opacity 藏、font-size 16px 防 iOS 聚焦時自動放大、放在視窗內防 iOS 捲動 */
+  #kbd { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0.01;
+    border: 0; padding: 0; font-size: 16px; z-index: -1; }
+  #overlay { position: fixed; inset: 0; display: none; flex-direction: column;
+    justify-content: center; align-items: center; background: rgba(0,0,0,.85);
+    text-align: center; padding: 24px; }
+  #overlay h2 { color: #2ea043; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span id="st">連線中…</span>
+    <button id="kbdBtn" class="gray">⌨️ 鍵盤</button>
+    <button id="doneBtn" class="green">完成登入</button>
+  </div>
+  <div id="wrap"><canvas id="cv" width="390" height="844"></canvas></div>
+  <textarea id="kbd" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
+  <div id="overlay"><h2>✅ 登入完成</h2><p>已把登入資料交給店家，這個分頁可以關掉了。</p></div>
+
+<script>
+const VIEW_W = 390, VIEW_H = 844;
+const token = location.pathname.split("/").pop();
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const st = document.getElementById("st");
+const kbd = document.getElementById("kbd");
+
+// 依螢幕寬度縮放畫布顯示大小（維持 390:844 比例）
+function fit() {
+  const barH = document.getElementById("bar").offsetHeight;
+  const availH = window.innerHeight - barH;
+  const availW = window.innerWidth;
+  let w = availW, h = w * VIEW_H / VIEW_W;
+  if (h > availH) { h = availH; w = h * VIEW_W / VIEW_H; }
+  cv.style.width = w + "px";
+  cv.style.height = h + "px";
+}
+window.addEventListener("resize", fit);
+fit();
+
+// ---- WebSocket：收畫面、送輸入 ----
+const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/remote/ws/" + token;
+let ws;
+function connect() {
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => st.textContent = "已連線，請在下方畫面登入";
+  ws.onclose = () => st.textContent = "連線中斷，重試中…";
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === "string") {
+      const m = JSON.parse(ev.data);
+      if (m.t === "finished") showDone();
+      return;
+    }
+    const bmp = await createImageBitmap(new Blob([ev.data], { type: "image/jpeg" }));
+    if (cv.width !== bmp.width || cv.height !== bmp.height) { cv.width = bmp.width; cv.height = bmp.height; }
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+  };
+}
+connect();
+setInterval(() => { if (ws.readyState === WebSocket.CLOSED) connect(); }, 2000);
+
+function send(o) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); }
+
+// 螢幕座標 → 視埠 CSS px（0..390 / 0..844）
+function toView(e) {
+  const r = cv.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(VIEW_W, (e.clientX - r.left) / r.width * VIEW_W)),
+    y: Math.max(0, Math.min(VIEW_H, (e.clientY - r.top) / r.height * VIEW_H)),
+  };
+}
+
+// ---- 觸控：短按=tap、拖曳=scroll ----
+let down = null, moved = false, lastY = 0;
+cv.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  down = toView(e); moved = false; lastY = down.y;
+});
+cv.addEventListener("pointermove", (e) => {
+  if (!down) return;
+  e.preventDefault();
+  const p = toView(e);
+  if (Math.abs(p.x - down.x) > 6 || Math.abs(p.y - down.y) > 6) moved = true;
+  if (moved) {
+    send({ t: "scroll", x: p.x, y: p.y, dx: 0, dy: (lastY - p.y) * 1.3 });
+    lastY = p.y;
+  }
+});
+cv.addEventListener("pointerup", (e) => {
+  if (!down) return;
+  e.preventDefault();
+  if (!moved) { const p = toView(e); send({ t: "tap", x: p.x, y: p.y }); }
+  down = null;
+});
+cv.addEventListener("pointercancel", () => { down = null; });
+
+// ---- 鍵盤 ----
+// 坑：空的輸入框在手機上按 Backspace 不會發任何事件（沒東西可刪就不觸發），刪除傳不出去。
+// 解法：預先塞一段隱形墊字（nbsp）當「刪除緩衝」，用「比對前後 value 差異」推算使用者做了什麼
+// （打字=尾端多出字元→送 text；變短→送對應次數的 Backspace）。這招對 iOS/注音/自動修正都最穩。
+const FILL = " ".repeat(8);   // 8 個不斷行空白當緩衝，看不見、可被刪
+let lastVal = "";
+function armKbd() { kbd.value = FILL; lastVal = FILL; kbd.setSelectionRange(FILL.length, FILL.length); }
+
+document.getElementById("kbdBtn").addEventListener("click", () => { armKbd(); kbd.focus(); });
+kbd.addEventListener("focus", armKbd);
+kbd.addEventListener("input", () => {
+  const v = kbd.value;
+  let i = 0, min = Math.min(v.length, lastVal.length);
+  while (i < min && v[i] === lastVal[i]) i++;   // 共同前綴長度
+  const removed = lastVal.length - i;
+  const added = v.slice(i);
+  for (let k = 0; k < removed; k++) send({ t: "key", key: "Backspace" });
+  if (added) send({ t: "text", text: added });
+  // 緩衝快用完或太長就重塞，讓刪除永遠有東西可刪、value 不會無限長
+  if (v.length < 4 || v.length > 40) armKbd(); else lastVal = v;
+});
+kbd.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); send({ t: "key", key: "Enter" }); }
+});
+
+// ---- 完成 ----
+document.getElementById("doneBtn").addEventListener("click", () => {
+  if (!confirm("確定登入好了嗎？按確定就把登入資料交給店家。")) return;
+  send({ t: "done" });
+  st.textContent = "處理中…";
+});
+function showDone() { document.getElementById("overlay").style.display = "flex"; try { ws.close(); } catch (e) {} }
+</script>
+</body>
+</html>

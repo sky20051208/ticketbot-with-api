@@ -2,7 +2,7 @@
 
 功能：
 - 管理多個 instance（profiles/acc_{id}/）
-- spawn `python -m tixcraftapi`（API 模式）/ main.py（瀏覽器模式）子進程
+- spawn `python -m tixcraftapi`（拓元）/ `python -m kktix_api`（KKTIX）子進程，依平台分派
 - 透過 pause.lock 暫停/繼續
 - WebSocket 推 stdout 即時 log
 """
@@ -53,9 +53,11 @@ class InstanceConfig(BaseModel):
     ENABLE_TIME_WATCHER: bool = True
     TIME_WATCH_URL: str = ""
     ENABLE_PROXY_POOL: bool = False
+    # 美國 VPS 多 IP 架構：填 OCI VNIC 上的次要私有 IP（例 10.0.0.88），每個 instance 一顆，
+    # 取代 proxy 做多開隔離。curl_cffi 和 Chrome 都會綁它。空 = 走預設路由
+    LOCAL_BIND_IP: str = ""
     LINE_USER_ID: str = ""   # 客人的 LINE userId（LINE 客服 bot 登記取得；空 = 不推播）
     TICKET_FEE: str = ""     # 搶票費（每個客人不同，寫進通知訊息）
-    run_mode: str = "API模式"  # 純前端用，決定 spawn `python -m tixcraftapi` 還是 main.py
     chrome_profile: str = MANUAL_COOKIE_OPTION  # 純前端用，「當前平台」選的 chrome profile 名
     # 純前端用，每平台各記一個 profile（{PLATFORM: profile名}）；切平台時前端自動套用對應的，
     # save_config 也以這份為準決定 COOKIE_SOURCE / CHROME_USER_DATA_DIR
@@ -216,6 +218,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# 遠端登入閘道（客人用手機開連結，操作跑在本機的 Chrome 完成登入）
+from remote_login.routes import router as remote_router  # noqa: E402
+app.include_router(remote_router)
+
 
 @app.get("/")
 async def index():
@@ -372,20 +378,13 @@ async def _start_one(id: int, req: StartReq) -> dict:
     tile = compute_tile(id, n, req.screen_w, req.screen_h)
     save_config(id, inst.config, tile)
 
-    is_api = inst.config.run_mode == "API模式"
-    if is_api:
-        # API 模式依平台分派：KKTIX → kktix_api，其餘（拓元）→ tixcraftapi
-        module = "kktix_api" if inst.config.PLATFORM == "KKTIX" else "tixcraftapi"
-        args = [
-            sys.executable, "-u", "-m", module,
-            "--config", str(config_path(id)),
-        ]
-    else:
-        args = [
-            sys.executable, "-u", str(PROJECT_DIR / "main.py"),
-            "--config", str(config_path(id)),
-            "--acc", str(id),
-        ]
+    # 依平台分派，其餘（拓元）→ tixcraftapi
+    module = {"KKTIX": "kktix_api",
+              "TICKETPLUS": "ticketplus_api"}.get(inst.config.PLATFORM, "tixcraftapi")
+    args = [
+        sys.executable, "-u", "-m", module,
+        "--config", str(config_path(id)),
+    ]
 
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"

@@ -18,6 +18,7 @@
 
 無 handler / UNKNOWN URL：fallback 回 GAME 從頭重來。
 """
+import os
 import itertools
 import time
 from dataclasses import dataclass
@@ -51,6 +52,8 @@ class Context:
     verify_url: Optional[str] = None
     result_url: Optional[str] = None
     captcha_prefetch: Optional[CaptchaPrefetch] = None
+    area_html: Optional[str] = None     # polling 直接抓到的 area 頁（用一次就清）
+    pool: Optional[object] = None       # session.WarmPool：並行請求用的常駐熱連線
     iter_n: int = 0
 
 
@@ -71,11 +74,15 @@ def _h_area(ctx: Context) -> Optional[str]:
     # captcha prefetch 跟 area 頁 GET 並行跑，把 captcha GET+OCR 從 submit critical path 砍掉。
     # 從這裡到 submit POST 之間，session 不可再 GET /ticket/captcha（server 只認最後一張）。
     # 重複進 AREA 會建新的 prefetch 蓋掉舊的 — 跟「最後一張才算」的 server 行為一致。
-    ctx.captcha_prefetch = CaptchaPrefetch(ctx.session, headers)
+    ctx.captcha_prefetch = CaptchaPrefetch(ctx.session, headers, pool=ctx.pool)
+    # polling 若已把 area 頁抓回來就直接用，用完立刻清（重進 AREA 一定要拿新的頁面，
+    # 舊 HTML 的餘票狀態早就過期了）
+    prefetched, ctx.area_html = ctx.area_html, None
     return select_area(ctx.session, ctx.area_url, headers,
                        area_keyword=config.AREA_KEYWORD,
                        exclude_keyword=config.EXCLUDE_AREA_KEYWORD,
-                       strategy=config.AREA_AUTO_SELECT_MODE)
+                       strategy=config.AREA_AUTO_SELECT_MODE,
+                       prefetched_html=prefetched)
 
 
 def _h_verify(ctx: Context) -> Optional[str]:
@@ -99,7 +106,7 @@ def _h_ticket(ctx: Context) -> Optional[str]:
     return submit_ticket(ctx.session, ctx.ticket_url, headers,
                          ticket_amount=config.TICKET_AMOUNT,
                          max_rounds=config.TICKET_CAPTCHA_RETRY,
-                         prefetch=prefetch)
+                         prefetch=prefetch, pool=ctx.pool)
 
 
 def _h_queue(ctx: Context) -> Optional[str]:
@@ -136,6 +143,21 @@ _URL_FIELD: dict[State, str] = {
 
 # ---------- main loop ----------
 
+def _check_pause() -> None:
+    """PAUSE：GUI 在 profiles/acc_{ACC_ID}/pause.lock 寫檔 → 在此阻塞到檔案被刪除。
+    只在 FSM state 邊界（run() 迴圈頂端）呼叫，不進 handler 內的網路熱迴圈
+    （poll_until_open / submit / follow_order），所以搶票熱路徑零影響。
+    軟暫停：正在排隊/結帳途中暫停太久，server 端名額/session/prefetch 驗證碼可能過期，
+    恢復後不保證搶得回；適合開搶前或清票重試空檔用。"""
+    lock = os.path.join(config.BASE_DIR, "profiles", f"acc_{config.ACC_ID}", "pause.lock")
+    if not os.path.exists(lock):
+        return
+    print("[PAUSE] 偵測到 pause.lock，暫停中…（GUI 按繼續 / 刪檔即恢復）")
+    while os.path.exists(lock):
+        time.sleep(0.3)
+    print("[PAUSE] 已繼續")
+
+
 def run(ctx: Context,
         handlers: dict[State, Handler] = DEFAULT_HANDLERS,
         initial: State = State.GAME,
@@ -159,6 +181,7 @@ def run(ctx: Context,
     prev_state: Optional[State] = None
     iterator = itertools.count() if max_iter is None else range(max_iter)
     for i in iterator:
+        _check_pause()  # state 邊界檢查暫停；熱迴圈不碰，不影響搶票速度
         ctx.iter_n = i + 1
         visit_count[state] = visit_count.get(state, 0) + 1
 

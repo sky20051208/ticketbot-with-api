@@ -49,7 +49,6 @@
         <div class="card-head">
           <div class="diamond"></div>
           <span class="card-name"></span>
-          <select class="fld f-runmode select-narrow"></select>
           <span class="status"></span>
           <span class="spacer"></span>
           <button class="btn btn-green btn-start">START</button>
@@ -76,6 +75,8 @@
               <label class="check"><input type="checkbox" class="f-timer"><span>TIMER</span></label>
               <label class="check"><input type="checkbox" class="f-proxy"><span>PROXY POOL</span></label>
             </div>
+
+            <div class="field f-narrow"><label>出口 IP</label><input class="fld f-bindip" type="text" placeholder="10.0.0.88" title="美國 VPS 多 IP 架構：填 OCI VNIC 上的次要私有 IP，這張卡的所有流量（curl_cffi + Chrome）都從對應的公網 IP 出去，取代 proxy 做多開隔離。留空 = 走預設路由（主 IP）。機器上要先掛好：rotate_ips.py --sync-os"></div>
 
             <div class="field"><label>客人 (LINE通知)</label><select class="fld f-lineuser" title="搶到票後推 LINE 通知給這個客人。客人清單用 topbar「客人管理」維護（客人自己跟客服 bot 對話登記會自動加入）。選 (不推播) = 這張卡不通知。"></select></div>
             <div class="field f-narrow"><label>搶票費</label><input class="fld f-fee" type="text" placeholder="800" title="寫進通知訊息的搶票費金額（每個客人不同）"></div>

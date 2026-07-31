@@ -22,21 +22,15 @@ echo.
 echo Which platform?
 echo   1 = Tixcraft
 echo   2 = KKTIX
-echo   3 = TicketPlus
 echo.
 set "PLATCHOICE="
-set /p PLATCHOICE="Enter 1, 2, or 3 [default 1]: "
+set /p PLATCHOICE="Enter 1 or 2 [default 1]: "
 
 if "%PLATCHOICE%"=="2" goto PLAT_KKTIX
-if "%PLATCHOICE%"=="3" goto PLAT_TICKETPLUS
 goto PLAT_TIXCRAFT
 
 :PLAT_KKTIX
 set "PLATFORM=kktix"
-goto PLAT_DONE
-
-:PLAT_TICKETPLUS
-set "PLATFORM=ticketplus"
 goto PLAT_DONE
 
 :PLAT_TIXCRAFT

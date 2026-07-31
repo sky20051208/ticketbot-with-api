@@ -24,12 +24,13 @@ from urllib.parse import urlparse
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
+from tixcraftapi.bind_proxy import BindingProxy
 from tixcraftapi.proxy_bridge import LocalProxyBridge
 
 BASE = "https://tixcraft.com"
 
 # 保留 bridge 物件 reference 避免 GC；thread 是 daemon，process 結束會自動收
-_active_bridges: list[LocalProxyBridge] = []
+_active_bridges: list[LocalProxyBridge | BindingProxy] = []
 
 
 # ==========================================
@@ -78,11 +79,31 @@ def setup_proxy_bridge(proxy_url: str) -> int | None:
     return local_port
 
 
-def apply_proxy_to_options(opts: Options, _unused_dir: str, proxy_url: str) -> bool:
-    """把 proxy 設定塞進 Chrome Options（透過 localhost bridge 處理 auth）。
-    回傳 True 表示真的套用了 proxy；False 表示 proxy_url 空或解析失敗。
+def setup_bind_proxy(bind_ip: str) -> int | None:
+    """啟動 localhost proxy 讓 Chrome 從指定的本機 IP 出去；回 local port，沒設回 None。
+
+    Chrome 沒有「指定來源 IP」的參數，只能靠 proxy 繞。用途見
+    [tixcraftapi/bind_proxy.py](tixcraftapi/bind_proxy.py)：eps_sid 綁出口 IP，
+    Chrome 必須跟 curl_cffi 的 `interface=` 綁同一顆，否則登入拿到的 cookie 直接作廢。
+    """
+    if not bind_ip:
+        return None
+    proxy = BindingProxy(bind_ip)
+    local_port = proxy.start()
+    _active_bridges.append(proxy)          # 防 GC，跟 process 共生死
+    print(f"[BIND-CHROME] 127.0.0.1:{local_port} → 來源 IP {bind_ip}")
+    return local_port
+
+
+def apply_proxy_to_options(opts: Options, _unused_dir: str, proxy_url: str,
+                           bind_ip: str = "") -> bool:
+    """把 proxy 設定塞進 Chrome Options。回傳 True 表示真的套用了。
+
+    兩種模式互斥，proxy_url 優先（有外部 proxy 時來源 IP 綁定沒有意義，出口由 proxy 決定）：
+      - `proxy_url` 非空 → 走 CliProxy，經 localhost bridge 補認證
+      - `bind_ip` 非空   → 直連但從指定本機 IP 出去（美國 VPS 多 IP 架構）
     第二個參數保留是為了相容介面（bridge 不需要 fs 路徑）。"""
-    local_port = setup_proxy_bridge(proxy_url)
+    local_port = setup_proxy_bridge(proxy_url) if proxy_url else setup_bind_proxy(bind_ip)
     if local_port is None:
         return False
     opts.add_argument(f"--proxy-server=http://127.0.0.1:{local_port}")
@@ -97,10 +118,11 @@ def apply_proxy_to_options(opts: Options, _unused_dir: str, proxy_url: str) -> b
 
 def launch_browser(user_data_dir: str, window_w: int = -1, window_h: int = -1,
                    window_x: int = -1, window_y: int = -1,
-                   proxy_url: str = ""):
+                   proxy_url: str = "", bind_ip: str = ""):
     """用指定 user-data-dir 開 Chrome（可見視窗），回 driver。
     proxy_url 非空時 Chrome 全程走該 proxy（透過 localhost bridge 處理 auth）；
-    空字串時直連，行為跟舊版相同。"""
+    bind_ip 非空時直連但從該本機 IP 出去（要跟 curl_cffi 的 interface= 一致）；
+    兩個都空時直連，行為跟舊版相同。"""
     opts = Options()
     opts.add_argument(f"--user-data-dir={user_data_dir}")
     opts.add_argument("--no-first-run")
@@ -114,7 +136,7 @@ def launch_browser(user_data_dir: str, window_w: int = -1, window_h: int = -1,
         opts.add_argument(f"--window-position={window_x},{window_y}")
 
     apply_stealth_to_options(opts)
-    apply_proxy_to_options(opts, user_data_dir, proxy_url)
+    apply_proxy_to_options(opts, user_data_dir, proxy_url, bind_ip)
 
     driver = webdriver.Chrome(options=opts)
     print(f"[LOGIN] Chrome 已開: {user_data_dir}")

@@ -3,7 +3,6 @@ const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
 const PLATFORMS  = ["TIXCRAFT", "KKTIX", "TICKETPLUS"];
 const AREA_MODES = ["關鍵字優先", "由上而下", "由下而上", "隨機"];
-const RUN_MODES  = ["API模式", "瀏覽器模式"];
 const MANUAL_COOKIE = "(手貼COOKIE)";
 let CUSTOMERS = [];  // [{name, user_id, concert}]，由 /api/customers 填（proxy 到 Cloudflare Worker + D1）
 let CHROME_PROFILES_BY_PLATFORM = {};  // {平台: [profile名...]}，由 /api/chrome_profiles 填
@@ -127,7 +126,6 @@ function renderCard(item) {
   setCardStatus(card, item.status);
 
   const cfg = item.config;
-  bindSelect(card, ".f-runmode",  RUN_MODES,  cfg.run_mode);
   bindSelect(card, ".f-platform", PLATFORMS,  cfg.PLATFORM);
   bindText  (card, ".f-slug",     cfg.ACTIVITY_SLUG);
   bindText  (card, ".f-time",     cfg.TARGET_START_TIME);
@@ -141,6 +139,7 @@ function renderCard(item) {
   bindText  (card, ".f-watchurl", cfg.TIME_WATCH_URL);
   bindCheck (card, ".f-timer",    cfg.ENABLE_TIME_WATCHER);
   bindCheck (card, ".f-proxy",    cfg.ENABLE_PROXY_POOL);
+  bindText  (card, ".f-bindip",   cfg.LOCAL_BIND_IP);
   const _custSel = card.querySelector(".f-lineuser");
   fillCustomerSelect(_custSel, cfg.LINE_USER_ID);
   _custSel.addEventListener("change", () => scheduleSave(card));
@@ -222,7 +221,6 @@ function readCardConfig(card) {
   _map[_platform] = _prof;
   card._profileMap = _map;
   return {
-    run_mode:                card.querySelector(".f-runmode").value,
     chrome_profile:          _prof,
     chrome_profile_map:      _map,
     PLATFORM:                _platform,
@@ -238,6 +236,7 @@ function readCardConfig(card) {
     TIME_WATCH_URL:          card.querySelector(".f-watchurl").value,
     ENABLE_TIME_WATCHER:     card.querySelector(".f-timer").checked,
     ENABLE_PROXY_POOL:       card.querySelector(".f-proxy").checked,
+    LOCAL_BIND_IP:           card.querySelector(".f-bindip").value.trim(),
     LINE_USER_ID:            card.querySelector(".f-lineuser").value,
     TICKET_FEE:              card.querySelector(".f-fee").value,
     COOKIE:                  card.querySelector(".f-cookie").value,

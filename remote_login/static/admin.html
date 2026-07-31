@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>遠端登入 · 管理</title>
+<style>
+  body { font-family: system-ui, "Noto Sans TC", sans-serif; max-width: 820px; margin: 24px auto;
+    padding: 0 16px; background: #0f1115; color: #e6e6e6; }
+  h1 { font-size: 20px; } h2 { font-size: 15px; color: #9ad; margin-top: 28px; }
+  .box { background: #171a21; border: 1px solid #262b35; border-radius: 10px; padding: 14px; margin: 10px 0; }
+  label { display: block; font-size: 13px; color: #9aa4b2; margin: 8px 0 3px; }
+  input, select { width: 100%; padding: 9px; border-radius: 7px; border: 1px solid #333;
+    background: #0d0f14; color: #eee; font-size: 14px; }
+  button { border: 0; border-radius: 8px; padding: 9px 14px; font-weight: 600; color: #fff;
+    background: #2d6cdf; font-size: 14px; cursor: pointer; }
+  button.gray { background: #3a3f4a; } button.red { background: #b3352e; }
+  .row { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 130px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { border-bottom: 1px solid #262b35; padding: 7px 6px; text-align: left; vertical-align: top; }
+  .link { word-break: break-all; color: #6cf; font-size: 12px; }
+  .cookie { word-break: break-all; font-size: 11px; color: #8f8; max-width: 260px; }
+  .pill { font-size: 11px; padding: 2px 7px; border-radius: 20px; }
+  .live { background: #1f4; color: #041; } .done { background: #6cf; color: #013; }
+  .closed, .created { background: #555; }
+  small { color: #7a8290; }
+</style>
+</head>
+<body>
+  <h1>🔑 遠端登入閘道</h1>
+
+  <div class="box">
+    <label>對外網址（cloudflared 給的 https://xxx.trycloudflare.com）</label>
+    <div class="row">
+      <div><input id="pub" placeholder="https://xxxx.trycloudflare.com"></div>
+      <button onclick="savePub()">儲存</button>
+    </div>
+    <small>先跑 tunnel_start.bat 拿到這條網址貼上；沒貼的話連結會是相對路徑（只能區網測）。</small>
+  </div>
+
+  <div class="box">
+    <h2 style="margin-top:0">開一個新登入 session</h2>
+    <div class="row">
+      <div><label>平台</label>
+        <select id="platform"><option value="tixcraft">拓元 Tixcraft</option><option value="kktix">KKTIX</option></select></div>
+      <div><label>帳號名（英文，會變 profile 資料夾名）</label><input id="name" placeholder="customer01"></div>
+    </div>
+    <label>Proxy URL（選填，這個客人固定走這條）</label>
+    <input id="proxy" placeholder="http://user:pass@host:port">
+    <div style="margin-top:12px"><button onclick="createSession()">開 session 並產生連結</button></div>
+    <div id="newlink"></div>
+  </div>
+
+  <h2>目前的 session</h2>
+  <div class="box"><table id="tbl"><thead>
+    <tr><th>平台/帳號</th><th>狀態</th><th>連結 / Cookie</th><th></th></tr></thead>
+    <tbody></tbody></table></div>
+
+<script>
+async function jget(u) { return (await fetch(u)).json(); }
+async function jpost(u, b) { return (await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b || {}) })).json(); }
+
+async function savePub() {
+  const r = await jpost("/api/remote/public_base", { public_base: document.getElementById("pub").value });
+  alert("已存：" + (r.public_base || "(空)")); refresh();
+}
+async function createSession() {
+  const name = document.getElementById("name").value.trim();
+  if (!name) return alert("請填帳號名");
+  const btn = event.target; btn.disabled = true; btn.textContent = "開啟中（Chrome 啟動要幾秒）…";
+  try {
+    const r = await jpost("/api/remote/session", {
+      platform: document.getElementById("platform").value,
+      name, proxy_url: document.getElementById("proxy").value.trim(),
+    });
+    if (r.detail) { alert("失敗：" + r.detail); return; }
+    document.getElementById("newlink").innerHTML =
+      `<div class="box" style="margin-top:12px">✅ 傳這條給客人（LINE 貼上即可）：<br>
+       <span class="link">${r.link}</span>
+       <button class="gray" onclick="navigator.clipboard.writeText('${r.link}')">複製</button></div>`;
+    refresh();
+  } finally { btn.disabled = false; btn.textContent = "開 session 並產生連結"; }
+}
+async function closeSession(t) { await jpost(`/api/remote/session/${t}/close`); refresh(); }
+function copy(s) { navigator.clipboard.writeText(s); }
+
+async function refresh() {
+  const d = await jget("/api/remote/sessions");
+  if (d.public_base && !document.getElementById("pub").value) document.getElementById("pub").value = d.public_base;
+  const tb = document.querySelector("#tbl tbody"); tb.innerHTML = "";
+  for (const s of d.sessions) {
+    const cookieCell = s.has_cookie
+      ? `<div class="cookie">${s.cookie.slice(0, 120)}…</div><button class="gray" onclick="copy(${JSON.stringify(s.cookie).replace(/"/g, '&quot;')})">複製 Cookie</button>`
+      : `<span class="link">${s.link}</span> <button class="gray" onclick="copy('${s.link}')">複製連結</button>`;
+    tb.insertAdjacentHTML("beforeend", `<tr>
+      <td>${s.platform}<br><b>${s.name}</b></td>
+      <td><span class="pill ${s.status}">${s.status}</span></td>
+      <td>${cookieCell}</td>
+      <td><button class="red" onclick="closeSession('${s.token}')">收掉</button></td></tr>`);
+  }
+}
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>

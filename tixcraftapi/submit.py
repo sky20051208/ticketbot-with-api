@@ -16,9 +16,15 @@ from tixcraftapi.parsing import parse_ticket_form, find_ticket_codes
 from captchaAI.predict import recognize_captcha
 
 
+# 沒帶 WarmPool 時（測試 / 單獨呼叫）的後備：至少是常駐的，同一 process 內反覆呼叫
+# 還能重用同一條 worker 的連線，比每次 `with ThreadPoolExecutor()` 現開好。
+_LOCAL_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="submit-fallback")
+
+
 def submit_ticket(session: cf_requests.Session, ticket_url: str, headers: dict,
                   ticket_amount, max_rounds: int,
-                  prefetch: CaptchaPrefetch | None = None) -> str | None:
+                  prefetch: CaptchaPrefetch | None = None,
+                  pool=None) -> str | None:
     captcha_headers = {**headers, "Referer": ticket_url}
 
     cached_payload: dict | None = None
@@ -40,28 +46,32 @@ def submit_ticket(session: cf_requests.Session, ticket_url: str, headers: dict,
     for round_n in range(1, max_rounds + 1):
         if cached_payload is None:
             t_par = time.perf_counter()
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                form_future = ex.submit(_timed_form_get)
-                # 第一輪 + 有 area prefetch：等預抓的 OCR 結果（不再 GET captcha）。
-                # 其他情況：fallback 並行抓圖。
-                use_prefetch = round_n == 1 and prefetch is not None
-                if use_prefetch:
-                    captcha_future = ex.submit(prefetch.wait, 3.0)
-                else:
-                    captcha_future = ex.submit(_timed_captcha)
-                try:
-                    res, form_ms = form_future.result()
-                except Exception as e:
-                    print(f"[TICKET] GET 異常: {e}")
-                    return None
-                captcha_result = captcha_future.result()
-            par_ms = (time.perf_counter() - t_par) * 1000
+            # 第一輪 + 有 area prefetch：等預抓的 OCR 結果（不再 GET captcha）。
+            # 其他情況：fallback 並行抓圖。
+            use_prefetch = round_n == 1 and prefetch is not None
+
+            # **form GET 一定留在呼叫端這條 thread（主執行緒）**：curl_cffi 連線池是
+            # thread-local，主執行緒那條在倒數期間一直被 ping 保持熱，丟去別的 thread
+            # 等於自願重跑一次 TLS 握手（走 proxy 實測貴 0.5~3 秒）。
+            # 真正需要並行的只有 captcha GET，丟給 WarmPool 的常駐 worker（連線同樣是熱的）。
+            captcha_future = None
+            if not use_prefetch:
+                captcha_future = (pool.submit(_timed_captcha) if pool is not None
+                                  else _LOCAL_POOL.submit(_timed_captcha))
+            try:
+                res, form_ms = _timed_form_get()
+            except Exception as e:
+                print(f"[TICKET] GET 異常: {e}")
+                return None
 
             if use_prefetch:
-                prefetched_code = captcha_result  # str | None
+                # prefetch 從 AREA 就開始跑，form GET 這段時間它一直在進行 → 這裡通常是 0 等待
+                prefetched_code = prefetch.wait(3.0)
+                par_ms = (time.perf_counter() - t_par) * 1000
                 print(f"[PERF] form GET={form_ms:.0f}ms / prefetch OCR={prefetched_code} / 並行總={par_ms:.0f}ms")
             else:
-                prefetched_img, captcha_ms = captcha_result
+                prefetched_img, captcha_ms = captcha_future.result()
+                par_ms = (time.perf_counter() - t_par) * 1000
                 print(f"[PERF] form GET={form_ms:.0f}ms / captcha GET={captcha_ms:.0f}ms / 並行總={par_ms:.0f}ms")
 
             raise_if_blocked(res, "TICKET GET")

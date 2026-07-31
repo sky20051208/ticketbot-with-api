@@ -59,6 +59,58 @@ def _install_log_timestamp():
     builtins.print = _stamped
 
 
+# 清票冷卻（對齊拓元 FSM）：售完/被搶走 = 5s（拓元 AREA 重入）；撞 403 被擋 = 8s（拓元 BLOCKED）。
+# 「有票就搶」永遠不冷卻（第一拍黃金時間）。
+CLEAR_COOLDOWN_SECONDS = 5.0
+BLOCKED_COOLDOWN_SECONDS = 8.0
+
+
+async def grab_loop(tab, slug: str, catalog: list, csrf: str) -> str | None:
+    """清票主迴圈：反覆「偵測開賣/有票 → 送單」，送單沒成就回頭重搶。
+
+    **不設時間上限** —— 一直跑到「搶到」或「硬失敗（如資格不符，重試無用）」，
+    否則就無限清票等回流票，由使用者按 GUI STOP 手動停（STOP 會直接砍掉整個 process）。
+
+    - reserve 回 (None, fatal=False) = 售完 / 被搶走 / 逾時 / csrf 過期 → 刷新 csrf、
+      （catalog 空的話）補抓 base_info，再回頭繼續搶（這就是「清票」）。
+    - reserve 回 (None, fatal=True)  = 硬失敗（資格不符）→ 停止，印原因。
+    - poll_until_open 一輪都沒符合條件的票也回來重跑，等別人釋票。"""
+    round_no = 0
+    while True:
+        round_no += 1
+        # catalog 還空就補抓一次（base_info 可能開賣才開放，或登入瞬間那發失敗）
+        if not catalog:
+            refetched = await kk_register.fetch_catalog(tab, slug, retries=2, delay=0.2)
+            if refetched:
+                catalog = refetched
+                print(f"[GRAB] 第 {round_no} 輪補抓到票種目錄（{len(catalog)} 種）")
+
+        result = await kk_register.poll_until_open(
+            tab, slug, catalog, csrf, max_duration=30.0,
+            clear_cooldown=CLEAR_COOLDOWN_SECONDS,      # 開賣但沒票 → 5s（拓元 AREA 重入）
+            blocked_cooldown=BLOCKED_COOLDOWN_SECONDS)  # 撞 403 → 8s（拓元 BLOCKED）
+        if result is None:
+            continue  # 這輪沒等到符合條件的票，回頭再等（清票）
+
+        order_url, fatal = await kk_reserve.reserve_ticket(tab, slug, result)
+        if order_url:
+            return order_url
+        if fatal:
+            # 硬失敗（如「非身心障礙認證會員不可選購」）—— 重試無用，停止清票，
+            # 讓使用者看到原因去改 config（AREA_KEYWORD / EXCLUDE_AREA_KEYWORD）。
+            print("[GRAB] 送單硬失敗（非售完，重試無用），停止清票")
+            return None
+
+        print(f"[GRAB] 第 {round_no} 輪送單未成（售完/被搶走），{CLEAR_COOLDOWN_SECONDS:.0f}s 後刷新 csrf 繼續清票…")
+        fresh = await kk_register.refetch_csrf(tab, slug)
+        if fresh:
+            csrf = fresh
+        await asyncio.sleep(CLEAR_COOLDOWN_SECONDS)
+
+    print(f"[GRAB] 清票逾時 {GRAB_TOTAL_SECONDS:.0f}s，未搶到")
+    return None
+
+
 async def main_async():
     slug = config.ACTIVITY_SLUG
     udd = config.CHROME_USER_DATA_DIR  # 空字串 → 臨時 profile，使用者每次手動登入
@@ -90,22 +142,18 @@ async def main_async():
     else:
         print("[TIMER] 定時啟動已關閉，直接開搶")
 
-    # --- fetch 高頻偵測開賣 + 選票（catalog/csrf 已預抓）---
-    result = await kk_register.poll_until_open(tab, slug, catalog, csrf)
-    if result is None:
-        print("[FAIL] 未抓到可選票")
+    # --- 清票迴圈：偵測開賣 → 送單，送單沒成（被搶走/售完/csrf 過期）就回頭重搶，
+    #     直到搶到或整體逾時。catalog 若還空（base_info 開賣後才開放）就開賣後補抓。---
+    order_url = await grab_loop(tab, slug, catalog, csrf)
+    target = order_url or registration_url(slug)
+    if order_url:
+        print(f"[SUCCESS] 搶到了! 跳轉: {order_url}")
     else:
-        # --- 送 queue 候位（fetch，已驗證）---
-        order_url = await kk_reserve.reserve_ticket(tab, slug, result)
-        target = order_url or registration_url(slug)
-        if order_url:
-            print(f"[SUCCESS] 搶到了! 跳轉: {order_url}")
-        else:
-            print(f"[FALLBACK] 已在候位佇列，導航到報名頁手動完成: {target}")
-        try:
-            await browser.get(target)
-        except Exception as e:
-            print(f"[WARN] 導航失敗: {e!r}")
+        print(f"[FALLBACK] 未搶到，導航到報名頁手動嘗試: {target}")
+    try:
+        await browser.get(target)
+    except Exception as e:
+        print(f"[WARN] 導航失敗: {e!r}")
 
     print("[DONE] 瀏覽器保持開啟 — 完成後關閉本程式（GUI: STOP）")
     try:

@@ -1,7 +1,7 @@
 搶票機器人使用說明
 ==========================================
 
-支援拓元（Tixcraft）/ KKTIX / TicketPlus 三大平台。
+支援拓元（Tixcraft）與 KKTIX 兩大平台。
 網頁版 War-Room 介面，可同時操作多個帳號。
 
 
@@ -13,7 +13,7 @@
    下載：https://www.python.org/downloads/
    安裝時務必把最下面的「Add Python to PATH」打勾，
    否則之後 setup.bat 會找不到 Python。
-3. Google Chrome（瀏覽器模式才需要；多數人本來就有）
+3. Google Chrome（KKTIX 搶票、或用「帳號 PROFILE」登入時需要；多數人本來就有）
 
 
 【二、第一次安裝（5~10 分鐘）】
@@ -70,9 +70,7 @@
 ▼ 每張卡片要填的東西
 
   ┌──────────────┬─────────────────────────────────────────┐
-  │ 模式選單      │ API模式（拓元，最快）                    │
-  │              │ 瀏覽器模式（KKTIX、TicketPlus 必選）     │
-  │ PLATFORM     │ TIXCRAFT / KKTIX / TICKETPLUS            │
+  │ PLATFORM     │ TIXCRAFT / KKTIX（依平台自動選搶票引擎）  │
   │ ACTIVITY SLUG│ 活動代號（活動網址最後一段）             │
   │              │ 例：26_mj116kh_r                         │
   │ START TIME   │ 開賣時間 24 小時制，例：12:00:00         │
@@ -84,7 +82,7 @@
   │              │ 例：輪椅;身障;Restricted View            │
   │ DATE         │ 場次日期關鍵字（多場次活動才用）         │
   │ PRESALE CODE │ 會員碼（沒有就空著）                     │
-  │ WATCH URL    │ 瀏覽器模式定時開搶要監控的頁面網址       │
+  │ WATCH URL    │ 定時開搶要監控的頁面網址                 │
   │ TIMER        │ 勾＝定時開搶；不勾＝立刻開搶             │
   │ PROXY POOL   │ 勾＝走 CliProxy 住宅 IP（已幫你設好）   │
   │              │ 不勾＝直接用你家網路 IP                  │
@@ -115,7 +113,7 @@
 
   【方式 B：手貼 COOKIE】
 
-  KKTIX / TicketPlus 目前只能用這個；拓元想用也可以。
+  拓元想用可以（KKTIX 建議走帳號 PROFILE 登入）。
   卡片「帳號 PROFILE」要保持選「(手貼COOKIE)」。
 
   1. 用 Chrome 打開該網站並「登入」你的帳號
@@ -134,7 +132,7 @@
 ▼ START / PAUSE / STOP / START ALL / STOP ALL
 
   START      啟動該卡片的 bot
-             （瀏覽器模式會自動開一個 Chrome 視窗）
+             （KKTIX、或用帳號 PROFILE 登入時會自動開 Chrome 視窗）
   PAUSE      暫停在當下、不繼續打 server；再按一次繼續
   STOP       直接關掉這張卡片的 bot
   START ALL  一鍵啟動全部卡片
@@ -153,7 +151,7 @@ Q. setup.bat 裝套件裝到一半失敗。
 A. 多半是網路問題，重跑一次。
    如果固定卡在某個套件，截圖訊息問。
 
-Q. 瀏覽器模式按 START 但沒開 Chrome。
+Q. KKTIX 按 START 但沒開 Chrome。
 A. 確認電腦有裝 Google Chrome（Edge 不算）。
 
 Q. 拓元搶到一半 cookie 失效（log 出現 Cookie 失效）。

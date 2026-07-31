@@ -1,6 +1,19 @@
-"""curl_cffi session 建立 + 共用 header + 暖機/keep-alive。"""
+"""curl_cffi session 建立 + 共用 header + 暖機/keep-alive/連線池預熱。
+
+**連線是 thread-local 的**（2026-07-26 實測，整包延遲的主因）：curl_cffi 的 Session
+預設 `use_thread_local_curl=True`，也就是「每個 thread 各自一份 curl handle = 各自一套
+連線池」。所以
+  - 背景 keep-alive thread 暖的是**它自己**那條連線，主執行緒（T-0 真正打第一發的那條）
+    照樣被 proxy/LB 的 idle timeout 收掉 → 第一發還是要重跑 TLS 握手
+  - 每次 `with ThreadPoolExecutor(...)` 都是全新 thread = 全新連線，並行抓驗證碼那發
+    永遠在付握手成本
+實測（走 CliProxy）：重用連線 ~360ms、新建連線 760~3500ms，差 2~10 倍。
+對策：並行請求一律丟 `WarmPool` 這組**常駐** worker，倒數期間持續 ping，讓主執行緒 +
+每條 worker 的連線全部保持熱。
+"""
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from curl_cffi import requests as cf_requests
 
@@ -10,8 +23,17 @@ from tixcraftapi import BASE
 from tixcraftapi.parsing import game_not_open, has_area_button
 
 
-def build_session(cookie_str: str) -> cf_requests.Session:
-    session = cf_requests.Session(impersonate="chrome124")
+def build_session(cookie_str: str, local_ip: str = "") -> cf_requests.Session:
+    """`local_ip` 非空時所有請求從該本機 IP 出去（curl 的 CURLOPT_INTERFACE）。
+
+    多開隔離用：一台機器掛多顆公網 IP，每個 instance 綁一顆，取代 proxy 換 IP。
+    **Chrome 必須綁同一顆**（見 [bind_proxy.py](bind_proxy.py)）—— eps_sid 綁發放時的
+    出口 IP，兩邊不一致的話瀏覽器過完挑戰拿到的 cookie 一交給 curl_cffi 就作廢。
+    """
+    kw = {"interface": local_ip} if local_ip else {}
+    session = cf_requests.Session(impersonate="chrome124", **kw)
+    if local_ip:
+        print(f"[SESSION] 綁定來源 IP: {local_ip}")
     for item in cookie_str.split("; "):
         if "=" in item:
             k, v = item.split("=", 1)
@@ -58,8 +80,60 @@ def warmup_session(session: cf_requests.Session, slug: str = ""):
         print(f"[WARMUP] 失敗（不致命）: {e}")
 
 
+class WarmPool:
+    """固定 size 條常駐 worker，每條各自握著一份「熱」的 curl 連線。
+
+    搶票期間所有需要並行的請求都丟這裡（不要再 `with ThreadPoolExecutor(...)` 現開），
+    理由見本檔頂端說明：新 thread = 新連線 = 多付一次 TLS 握手。
+
+    生命週期跟 process 一樣長（daemon thread，不用特別收）。
+    """
+
+    def __init__(self, session: cf_requests.Session, slug: str = "", size: int = 2):
+        self.session = session
+        self.size = size
+        self.target = f"{BASE}/activity/game/{slug}" if slug else f"{BASE}/"
+        self.headers = build_headers()
+        self._ex = ThreadPoolExecutor(max_workers=size, thread_name_prefix="warm")
+
+    def submit(self, fn, *args, **kwargs):
+        return self._ex.submit(fn, *args, **kwargs)
+
+    def warm(self, timeout: float = 8.0, quiet: bool = False):
+        """讓「每一條」worker 各打一發，把連線建起來 / 續命。
+
+        用 Barrier 把先領到工作的 worker 卡住，逼 executor 把後面的工作派給還沒動的
+        worker —— 不然 N 個工作可能被同一條 thread 依序吃光，其他 worker 的連線還是冷的。"""
+        barrier = threading.Barrier(self.size)
+
+        def _one():
+            try:
+                barrier.wait(timeout=timeout)   # 等所有 worker 都就位再一起打
+            except threading.BrokenBarrierError:
+                pass
+            t0 = time.monotonic()
+            try:
+                self.session.get(self.target, headers=self.headers, timeout=timeout)
+                return (time.monotonic() - t0) * 1000
+            except Exception:
+                return -1.0
+
+        futures = [self._ex.submit(_one) for _ in range(self.size)]
+        rtts = []
+        for f in futures:
+            try:
+                rtts.append(f.result(timeout=timeout + 2))
+            except Exception:
+                rtts.append(-1.0)
+        if not quiet:
+            shown = " / ".join("失敗" if ms < 0 else f"{ms:.0f}ms" for ms in rtts)
+            print(f"[POOL] {self.size} 條並行連線已預熱: {shown}")
+        return rtts
+
+
 def keep_alive_loop(session: cf_requests.Session, stop_event: threading.Event,
-                    slug: str = "", interval: float = 15.0):
+                    slug: str = "", interval: float = 15.0,
+                    pool: "WarmPool | None" = None):
     """背景 thread：定期 ping /activity/game/{slug} 維持 TLS connection + 該 endpoint warm。
     間隔 15s（原 30s）：proxy / LB 的 idle timeout 常見 30-60s，30s 一次太貼邊，
     T-0 第一發可能踩到剛被收掉的連線要重握手 — 這正是 session 延遲的主要來源之一。
@@ -68,10 +142,15 @@ def keep_alive_loop(session: cf_requests.Session, stop_event: threading.Event,
       - 「即將開賣 / coming soon」→ 尚未開放
       - 有場次按鈕 → !!! 提前開賣 !!!（log 大聲警告）
       - 其他 → 內容狀態未知
-    T-0 之前必須 stop_event.set() 停止，避免跟主流程搶 session。"""
+    T-0 之前必須 stop_event.set() 停止，避免跟主流程搶 session。
+
+    給 pool 時每輪順便 `pool.warm()` 讓 worker 的連線一起續命（這條 thread 自己的 ping
+    只能暖到自己那份 handle，暖不到別條 —— 見本檔頂端說明）。"""
     target = f"{BASE}/activity/game/{slug}" if slug else f"{BASE}/"
     headers = build_headers()
     while not stop_event.wait(interval):
+        if pool is not None:
+            pool.warm(quiet=True)
         try:
             t0 = time.monotonic()
             res = session.get(target, headers=headers, timeout=5)
