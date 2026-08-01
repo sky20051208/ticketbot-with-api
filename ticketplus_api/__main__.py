@@ -116,12 +116,10 @@ def poll_and_grab(session, plan: dict, token: str) -> dict:
     started = time.monotonic()
     cooldown: dict[str, float] = {}   # per 票種：售完/被搶走後的清票冷卻
     attempt = 0
-    last_report = 0.0
 
     while True:
         attempt += 1
-        quiet = attempt > 3
-        result, blocked = catalog.get_infos(session, product_ids, area_ids, log=not quiet)
+        result, blocked = catalog.get_infos(session, product_ids, area_ids)
         if blocked:
             print(f"[POLL] #{attempt} 被流量管制/擋，退避 {BLOCKED_COOLDOWN:.0f}s（對齊拓元 BLOCKED）")
             time.sleep(BLOCKED_COOLDOWN)
@@ -135,11 +133,10 @@ def poll_and_grab(session, plan: dict, token: str) -> dict:
                                      amount, exclude=config.EXCLUDE_AREA_KEYWORD)
         if not target:
             open_now = parsing.sale_open(product_infos)
-            if now - last_report > 5:
-                last_report = now
-                states = {i.get("status") for i in product_infos.values()} or {"?"}
-                phase = f"清票中…{CLEAR_COOLDOWN:.0f}s 等回流" if open_now else "全速等開賣"
-                print(f"[POLL] #{attempt} 尚無可買票種（{phase}，狀態: {'/'.join(sorted(map(str, states)))}）")
+            # 每一發都印出來（不隱藏）——開賣翻 onsale 的瞬間才看得到
+            states = {i.get("status") for i in product_infos.values()} or {"?"}
+            phase = f"清票中…{CLEAR_COOLDOWN:.0f}s 等回流" if open_now else "全速等開賣"
+            print(f"[POLL] #{attempt} 尚無可買票種（{phase}，狀態: {'/'.join(sorted(map(str, states)))}）")
             # 開賣但沒票 → 5s 清票；還沒開賣 → 全速等 T-0（golden，抓開賣瞬間）
             time.sleep(CLEAR_COOLDOWN if open_now else fast_interval)
             continue
@@ -221,9 +218,9 @@ async def main_async():
     warmup_session(session)
 
     if config.ENABLE_TIME_WATCHER:
-        watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL)
+        watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL, lead_seconds=0.4)
         print(f"[TIMER] 目標時間: {config.TARGET_START_TIME}")
-        product_ids = [p["productId"] for p in plan["products"]]
+        product_ids = [p["productId"] for _, p in plan["targets"]]
         await watcher.wait_for_open_async(on_tick=make_keepalive(session, product_ids))
     else:
         print("[TIMER] 定時啟動已關閉，直接開搶")

@@ -9,10 +9,13 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 class TimeWatcher:
-    def __init__(self, target_time_str, target_url):
+    def __init__(self, target_time_str, target_url, lead_seconds=0.9):
         self.target_time_str = target_time_str
-        self.target_url = target_url 
+        self.target_url = target_url
         self.target_time = None
+        # 提前幾秒觸發（給 polling 緩衝抓開賣瞬間）。各平台不同：
+        # 拓元 0.7 / KKTIX 0.3 / 遠大 0.1（連線 RTT + 送單耗時越大者提前越多）
+        self.lead_seconds = lead_seconds
         
         # 直接對 tixcraft 自己的伺服器時間 — 搶票判斷的權威時間
         # （fallback: utimetool → google）
@@ -177,8 +180,8 @@ class TimeWatcher:
             current_tw_time = datetime.fromtimestamp(now) + self.time_offset
             remaining = (self.target_time - current_tw_time).total_seconds()
             
-            # 觸發點：提早 0.9 秒回傳，給 polling 緩衝抓開賣瞬間
-            if remaining <= 0.9:
+            # 觸發點：提早 self.lead_seconds 秒回傳，給 polling 緩衝抓開賣瞬間
+            if remaining <= self.lead_seconds:
                 print("\n⚡⚡⚡ 時間到！啟動瀏覽器搶票！ ⚡⚡⚡")
                 return True
 

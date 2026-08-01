@@ -55,7 +55,7 @@ def load_config_override():
 def wait_until_start(target_time_str: str, on_tick=None):
     """精準計時器（網路對時）— TimeWatcher 內部處理 NTP / 拓元 server time。
     on_tick 每輪倒數在**主執行緒**呼叫一次（用來 ping 主執行緒自己的連線）。"""
-    watcher = TimeWatcher(target_time_str, config.TIME_WATCH_URL)
+    watcher = TimeWatcher(target_time_str, config.TIME_WATCH_URL, lead_seconds=0.7)
     asyncio.run(watcher.wait_for_open_async(on_tick=on_tick))
 
 

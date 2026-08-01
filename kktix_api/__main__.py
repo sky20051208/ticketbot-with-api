@@ -125,7 +125,7 @@ async def main_async():
 
     # --- 倒數（TimeWatcher 是 async，直接 await）---
     if config.ENABLE_TIME_WATCHER:
-        watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL)
+        watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL, lead_seconds=0.3)
         print(f"[TIMER] 目標時間: {config.TARGET_START_TIME}")
         # 倒數期間背景定期重抓 csrf + keep-alive，避免等太久 session/csrf 失效
         holder = {"csrf": csrf}
