@@ -8,9 +8,9 @@ $ErrorActionPreference = "Stop"
 $desktop = [Environment]::GetFolderPath("Desktop")
 $shell = New-Object -ComObject WScript.Shell
 
+# 桌面只放一個 —— 開機/關機都在面板裡按，不用兩個圖示擠在桌面上也不怕按錯。
 $items = @(
-    @{ Name = "搶票VPS 開機"; Target = "vps_start.bat"; Icon = "assets\vps_start.ico"; Desc = "開機並打開 War-Room" },
-    @{ Name = "搶票VPS 關機"; Target = "vps_stop.bat";  Icon = "assets\vps_stop.ico";  Desc = "收通道並關機（省錢關鍵）" }
+    @{ Name = "拓元美東虛擬機"; Target = "vps_panel.bat"; Icon = "assets\vps_panel.ico"; Desc = "開關美東搶票 VPS" }
 )
 
 foreach ($item in $items) {
@@ -34,5 +34,5 @@ foreach ($item in $items) {
 }
 
 Write-Host ""
-Write-Host "  桌面上綠色是開機、紅色是關機。" -ForegroundColor Green
+Write-Host "  桌面上點「拓元美東虛擬機」就會跳出開關面板。" -ForegroundColor Green
 Write-Host "  圖示沒馬上更新的話，在桌面按 F5 重新整理一次。"
