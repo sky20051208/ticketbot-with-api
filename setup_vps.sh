@@ -109,6 +109,7 @@ After=network.target
 User=$USER
 ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24
 Restart=always
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -126,6 +127,10 @@ WorkingDirectory=$REPO_DIR
 Environment=DISPLAY=:99
 ExecStart=$VENV/bin/python run_webgui.py
 Restart=on-failure
+# webgui 會 spawn 搶票子進程和 Chrome，收得慢；10 秒沒結束就整個 cgroup SIGKILL，
+# 不然關機會卡在 systemd 等它（實測 SOFTSTOP 卡超過 5 分鐘就是這個原因）
+TimeoutStopSec=10
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target
@@ -144,6 +149,7 @@ Requires=xvfb.service
 User=$USER
 ExecStart=/usr/bin/x11vnc -display :99 -localhost -nopw -forever -shared -quiet
 Restart=always
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -159,6 +165,7 @@ Requires=x11vnc.service
 User=$USER
 ExecStart=/usr/bin/websockify --web=/usr/share/novnc 6080 localhost:5900
 Restart=always
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
