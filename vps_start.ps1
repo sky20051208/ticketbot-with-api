@@ -49,9 +49,21 @@ $state = $inst.data.'lifecycle-state'
 Write-Host "    目前：$state"
 
 if ($state -ne "RUNNING") {
-    Say "開機中（約 40 秒）"
-    & oci compute instance action --instance-id $VpsInstanceOcid --action START --wait-for-state RUNNING | Out-Null
+    Say "送出開機指令"
+    # 不用 --wait-for-state：它會靜靜卡住，看起來像當掉。自己輪詢才顯示得出進度。
+    & oci compute instance action --instance-id $VpsInstanceOcid --action START | Out-Null
     if ($LASTEXITCODE -ne 0) { Warn "開機失敗"; exit 1 }
+
+    Say "等待進入 RUNNING（約 40 秒）"
+    $deadline = (Get-Date).AddSeconds(300)
+    while ((Get-Date) -lt $deadline) {
+        $state = & oci compute instance get --instance-id $VpsInstanceOcid --query 'data."lifecycle-state"' --raw-output
+        if ($state -eq "RUNNING") { break }
+        Write-Host "." -NoNewline
+        Start-Sleep -Seconds 5
+    }
+    Write-Host ""
+    if ($state -ne "RUNNING") { Warn "開機超時，目前狀態 $state"; exit 1 }
 }
 
 # --- 2. 取公網 IP ---

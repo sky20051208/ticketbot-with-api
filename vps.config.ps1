@@ -5,7 +5,7 @@
 #
 # 這裡沒有任何機密（OCID 不是憑證，要動它得有 API 金鑰），可以安心 commit。
 
-$VpsInstanceOcid = "ocid1.instance.oc1.iad.請貼上你的完整OCID"
+$VpsInstanceOcid = "ocid1.instance.oc1.iad.anuwcljt76jdqbycacjhwpbb2z2sshgrrf3bwm2whbupmjtrywh4ffmkwlsa"
 
 $VpsUser    = "ubuntu"
 $VpsKeyPath = "$env:USERPROFILE\.ssh\ticket-ohio.pem"

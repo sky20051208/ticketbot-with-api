@@ -38,12 +38,29 @@ if (-not (Get-Command oci -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-Say "關機中（SOFTSTOP，會讓 OS 正常關閉）"
-# SOFTSTOP = 送 ACPI 關機訊號，讓 systemd 服務正常收尾；STOP 是直接斷電
-& oci compute instance action --instance-id $VpsInstanceOcid --action SOFTSTOP --wait-for-state STOPPED | Out-Null
-
+Say "送出關機指令（SOFTSTOP，讓 OS 正常關閉）"
+# SOFTSTOP = 送 ACPI 訊號讓 systemd 服務正常收尾；STOP 是直接斷電。
+# 不用 --wait-for-state：它會靜靜卡住好幾分鐘，看起來像當掉。自己輪詢才能顯示進度。
+& oci compute instance action --instance-id $VpsInstanceOcid --action SOFTSTOP | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Warn "關機指令失敗 —— 請去 Console 手動確認機器狀態，別讓它空轉計費"
+    exit 1
+}
+
+Say "等待關機完成（ACPI 關機通常 1~3 分鐘）"
+$deadline = (Get-Date).AddSeconds(300)
+$state = ""
+while ((Get-Date) -lt $deadline) {
+    $state = & oci compute instance get --instance-id $VpsInstanceOcid --query 'data."lifecycle-state"' --raw-output
+    if ($state -eq "STOPPED") { break }
+    Write-Host "." -NoNewline
+    Start-Sleep -Seconds 5
+}
+Write-Host ""
+
+if ($state -ne "STOPPED") {
+    Warn "5 分鐘後狀態還是 $state。關機指令已送出，通常會自己完成；"
+    Warn "但請過一下去 Console 確認，別讓它空轉計費。"
     exit 1
 }
 
