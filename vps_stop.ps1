@@ -48,10 +48,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Say "等待關機完成（ACPI 關機通常 1~3 分鐘）"
+# 不用 oci 的 --query：那是 JMESPath，`data."lifecycle-state"` 裡的雙引號在 PowerShell
+# 的參數解析下會被吃掉，oci 收到的變成非法的 data.lifecycle-state。整包 JSON 自己解最穩。
 $deadline = (Get-Date).AddSeconds(300)
 $state = ""
 while ((Get-Date) -lt $deadline) {
-    $state = & oci compute instance get --instance-id $VpsInstanceOcid --query 'data."lifecycle-state"' --raw-output
+    $json = & oci compute instance get --instance-id $VpsInstanceOcid | ConvertFrom-Json
+    $state = $json.data.'lifecycle-state'
     if ($state -eq "STOPPED") { break }
     Write-Host "." -NoNewline
     Start-Sleep -Seconds 5

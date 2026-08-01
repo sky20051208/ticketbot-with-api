@@ -42,10 +42,17 @@ if (-not (Get-Command oci -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
+# 不用 oci 的 --query：那是 JMESPath，`data."lifecycle-state"` 裡的雙引號在 PowerShell
+# 的參數解析下會被吃掉，oci 收到的變成非法的 data.lifecycle-state。整包 JSON 拉回來自己解
+# 最穩，也不用跟引號搏鬥。
+function Get-VpsState {
+    $json = & oci compute instance get --instance-id $VpsInstanceOcid | ConvertFrom-Json
+    return $json.data.'lifecycle-state'
+}
+
 # --- 1. 開機（已經在跑就跳過）---
 Say "查詢執行個體狀態"
-$inst = & oci compute instance get --instance-id $VpsInstanceOcid | ConvertFrom-Json
-$state = $inst.data.'lifecycle-state'
+$state = Get-VpsState
 Write-Host "    目前：$state"
 
 if ($state -ne "RUNNING") {
@@ -57,7 +64,7 @@ if ($state -ne "RUNNING") {
     Say "等待進入 RUNNING（約 40 秒）"
     $deadline = (Get-Date).AddSeconds(300)
     while ((Get-Date) -lt $deadline) {
-        $state = & oci compute instance get --instance-id $VpsInstanceOcid --query 'data."lifecycle-state"' --raw-output
+        $state = Get-VpsState
         if ($state -eq "RUNNING") { break }
         Write-Host "." -NoNewline
         Start-Sleep -Seconds 5
