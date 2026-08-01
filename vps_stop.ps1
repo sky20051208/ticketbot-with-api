@@ -14,6 +14,19 @@ $ErrorActionPreference = "Stop"
 function Say($msg)  { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Warn($msg) { Write-Host "!!  $msg" -ForegroundColor Yellow }
 
+function Wait-Stopped($TimeoutSec) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $state = ""
+    while ((Get-Date) -lt $deadline) {
+        $json = & oci compute instance get --instance-id $VpsInstanceOcid | ConvertFrom-Json
+        $state = $json.data.'lifecycle-state'
+        if ($state -eq "STOPPED") { return $state }
+        Write-Host "." -NoNewline
+        Start-Sleep -Seconds 5
+    }
+    return $state
+}
+
 # --- 1. 收通道 ---
 Say "關閉 SSH 通道"
 if (Test-Path $VpsTunnelPidFile) {
@@ -50,20 +63,21 @@ if ($LASTEXITCODE -ne 0) {
 Say "等待關機完成（ACPI 關機通常 1~3 分鐘）"
 # 不用 oci 的 --query：那是 JMESPath，`data."lifecycle-state"` 裡的雙引號在 PowerShell
 # 的參數解析下會被吃掉，oci 收到的變成非法的 data.lifecycle-state。整包 JSON 自己解最穩。
-$deadline = (Get-Date).AddSeconds(300)
-$state = ""
-while ((Get-Date) -lt $deadline) {
-    $json = & oci compute instance get --instance-id $VpsInstanceOcid | ConvertFrom-Json
-    $state = $json.data.'lifecycle-state'
-    if ($state -eq "STOPPED") { break }
-    Write-Host "." -NoNewline
-    Start-Sleep -Seconds 5
-}
+$state = Wait-Stopped -TimeoutSec 180
 Write-Host ""
 
+# SOFTSTOP 卡住通常是 OS 端有服務不肯結束（Chrome / webgui / xrdp），systemd 每個服務
+# 等 90 秒才放棄，疊起來輕鬆破五分鐘；OCI 要 15 分鐘才自己強制斷電。與其讓使用者乾等
+# 或忘記關（那才是真正燒錢的情況），三分鐘後直接強制斷電。ext4 有 journal，不會壞資料。
 if ($state -ne "STOPPED") {
-    Warn "5 分鐘後狀態還是 $state。關機指令已送出，通常會自己完成；"
-    Warn "但請過一下去 Console 確認，別讓它空轉計費。"
+    Warn "SOFTSTOP 超過 3 分鐘還沒完成（目前 $state），改用強制斷電"
+    & oci compute instance action --instance-id $VpsInstanceOcid --action STOP | Out-Null
+    $state = Wait-Stopped -TimeoutSec 180
+    Write-Host ""
+}
+
+if ($state -ne "STOPPED") {
+    Warn "強制斷電後狀態還是 $state —— 請去 Console 手動確認，別讓它空轉計費"
     exit 1
 }
 
