@@ -70,14 +70,19 @@ Write-Host ""
 # 等 90 秒才放棄，疊起來輕鬆破五分鐘；OCI 要 15 分鐘才自己強制斷電。與其讓使用者乾等
 # 或忘記關（那才是真正燒錢的情況），三分鐘後直接強制斷電。ext4 有 journal，不會壞資料。
 if ($state -ne "STOPPED") {
-    Warn "SOFTSTOP 超過 3 分鐘還沒完成（目前 $state），改用強制斷電"
-    & oci compute instance action --instance-id $VpsInstanceOcid --action STOP | Out-Null
-    $state = Wait-Stopped -TimeoutSec 180
+    Warn "SOFTSTOP 超過 3 分鐘還沒完成（目前 $state），試著改用強制斷電"
+    # 前一個動作還在進行時 OCI 會回 "currently being modified" 拒絕第二個動作。
+    # 這不是錯誤 —— SOFTSTOP 本身有 15 分鐘上限，超時 OCI 自己會斷電，繼續等就好。
+    & oci compute instance action --instance-id $VpsInstanceOcid --action STOP 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "    OCI 還在處理前一個動作，繼續等它自己完成（上限 15 分鐘）"
+    }
+    $state = Wait-Stopped -TimeoutSec 780
     Write-Host ""
 }
 
 if ($state -ne "STOPPED") {
-    Warn "強制斷電後狀態還是 $state —— 請去 Console 手動確認，別讓它空轉計費"
+    Warn "等了 16 分鐘狀態還是 $state —— 請去 Console 手動確認，別讓它空轉計費"
     exit 1
 }
 
