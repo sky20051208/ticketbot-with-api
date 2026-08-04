@@ -163,7 +163,10 @@ Requires=x11vnc.service
 
 [Service]
 User=$USER
-ExecStart=/usr/bin/websockify --web=/usr/share/novnc 6080 localhost:5900
+# 一定要寫成 127.0.0.1:6080 —— websockify 只給埠號的話會綁 0.0.0.0，等於把無密碼的
+# noVNC 暴露在公網介面上。目前 Security List 只放行 22 埠擋住了，但不該靠那個當唯一防線。
+# 走 SSH 通道進來完全不受影響。
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 127.0.0.1:6080 localhost:5900
 Restart=always
 TimeoutStopSec=10
 
