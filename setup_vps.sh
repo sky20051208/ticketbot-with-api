@@ -175,7 +175,11 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now xvfb.service x11vnc.service novnc.service tixcraft-webgui.service
+sudo systemctl enable xvfb.service x11vnc.service novnc.service tixcraft-webgui.service
+# 一定要 restart 不能只 enable --now —— 對已經在跑的服務，`--now` 不會重啟，
+# 改寫的 unit 檔就靜靜地不生效（踩過一次：改了 websockify 的綁定位址卻沒套上）。
+# 這支是維護腳本，跑的時候不該有搶票在進行。
+sudo systemctl restart xvfb.service x11vnc.service novnc.service tixcraft-webgui.service
 sleep 3
 systemctl is-active xvfb x11vnc novnc tixcraft-webgui | tr '\n' ' '; echo
 
