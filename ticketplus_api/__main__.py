@@ -198,8 +198,30 @@ def build_plan(session, event_id: str) -> dict | None:
     order = " > ".join(parsing.target_label(a, p) for a, p in targets)
     print(f"[PLAN] {kind}活動，優先序: {order}")
 
+    _warn_if_serial_required(session, targets)
     return {"session": sess, "session_id": session_id, "targets": targets,
             "amount": int(config.TICKET_AMOUNT or 1)}
+
+
+def _warn_if_serial_required(session, targets):
+    """開賣前先查一次票況，看候選票種有沒有綁「專屬代碼」（會員優先購／問答題）。
+
+    判斷依據跟前端一致：票種的 `serialKey` 非空 → 送單時必須帶 serialNumber，
+    沒帶或填錯官方回 errCode 124/125。與其等 T-0 被打回，不如現在就講。
+    """
+    infos, _ = catalog.get_infos(session, [p["productId"] for _, p in targets], log=False)
+    need = [p for _, p in targets
+            if (infos.get("product") and
+                any(i.get("id") == p["productId"] and i.get("serialKey")
+                    for i in infos["product"]))]
+    if not need:
+        return
+    names = "、".join(str(p.get("name")) for p in need)
+    if config.PRESALE_CODE:
+        print(f"[PLAN] ⚠ 這場需要專屬代碼（{names}），將帶 PRESALE_CODE 送出")
+    else:
+        print(f"[PLAN] ⚠ 這場需要專屬代碼（{names}），但 PRESALE_CODE 是空的 —— "
+              f"送單會被官方以 errCode 124 打回，請先填會員碼／問答題答案")
 
 
 async def main_async():
@@ -241,9 +263,14 @@ async def main_async():
         print(f"[SUCCESS] 結帳頁: {url}")
         if config.ENABLE_LINE_NOTIFY and config.LINE_USER_ID:
             line_push.notify_grabbed(config.LINE_USER_ID, slug=event_id,
-                                     amount=str(plan["amount"]), fee=config.TICKET_FEE)
+                                     amount=str(plan["amount"]), fee=config.TICKET_FEE,
+                                     platform="TICKETPLUS")
         if tab is not None:
             await tp_browser.goto_checkout(tab, event_id, plan["session_id"], seat)
+            # 導到結帳頁後截圖推給客人證明搶到（截圖失敗不影響——票已到手）
+            if config.ENABLE_LINE_NOTIFY and config.LINE_USER_ID:
+                await tp_browser.wait_checkout_ready(tab)  # 等 SPA render 出訂單再截
+                await line_push.notify_checkout_from_tab(config.LINE_USER_ID, tab)
     else:
         print(f"[FAIL] {outcome.get('error')}")
 

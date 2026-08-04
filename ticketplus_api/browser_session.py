@@ -90,6 +90,32 @@ async def open_and_login(user_data_dir: str, event_id: str,
     return browser, tab, ""
 
 
+async def wait_checkout_ready(tab, timeout: float = 6.0):
+    """等結帳確認頁把「伺服器端訂單」render 出來再回來（給截圖用）。
+
+    /confirmSeat（或 /confirm）是 Vue SPA，init() 要先打 getUserCurrentReservedOrder 從
+    伺服器重建訂單才會顯示座位/明細，太早截會是 loading 或空白。判斷：路由還停在 confirm
+    （沒被 redirect 回 order）且 body 文字量足夠並連續兩次穩定。逾時就直接回（截圖照拍，
+    不能因為等不到就不推）。"""
+    deadline = time.monotonic() + timeout
+    last_len = -1
+    while time.monotonic() < deadline:
+        try:
+            href = await tab.evaluate("location.pathname", return_by_value=True)
+            tlen = await tab.evaluate(
+                "document.body ? document.body.innerText.length : 0", return_by_value=True)
+        except Exception:
+            await asyncio.sleep(0.3)
+            continue
+        tlen = tlen if isinstance(tlen, int) else 0
+        on_confirm = isinstance(href, str) and "confirm" in href
+        if on_confirm and tlen > 300 and tlen == last_len:
+            return   # 內容穩定 → render 完
+        last_len = tlen
+        await asyncio.sleep(0.4)
+    print("[FINALIZE] 等結帳頁 render 逾時，仍先截圖")
+
+
 async def goto_checkout(tab, event_id: str, session_id: str, seat_assignment: bool):
     """把已登入的視窗導去結帳確認頁讓人（或客人）接手付款。"""
     url = checkout_url(event_id, session_id, seat_assignment)

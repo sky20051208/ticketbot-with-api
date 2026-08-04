@@ -47,6 +47,10 @@ ERR_MESSAGES = {
     "115": "票種已售完或超過購票上限（官方會踢回活動頁）",
     "116": "座位已售完／無連續座位",
     "121": "票況已變（前端自己產的碼，不是伺服器回的）",
+    "124": "專屬代碼錯誤／問答題答錯（PRESALE_CODE 填錯）",
+    "125": "專屬代碼已被使用過，要換一組新的",
+    "135": "圖形驗證碼驗證失敗",
+    "136": "圖形驗證碼已過期",
     "137": "排隊中／處理中，照 waitSecond 等",
     "999": "請求本身失敗（前端 axios catch 用的碼，代表網路或 HTTP 層掛了）",
 }
@@ -57,6 +61,11 @@ AUTH_ERR_CODES = {"101", "103"}
 
 # 這些是「這個票種沒了」，換下一個票區馬上重試，不用等
 SOLDOUT_ERR_CODES = {"111", "112", "113", "115", "116", "121"}
+
+# 專屬代碼／驗證碼問題：重試一百次也不會過，直接中止叫人處理
+#   124/125 = PRESALE_CODE 填錯或已被用掉
+#   135/136 = 這場有圖形驗證碼（本 bot 未實作，見 CLAUDE.md）
+CODE_ERR_CODES = {"124", "125", "135", "136"}
 
 # 排隊中 —— 不是錯誤，log 要顯示成「排隊中」而不是一串 errCode
 QUEUE_WAIT_CODES = {"137"}
@@ -72,6 +81,11 @@ def describe(code) -> str:
 
 def is_auth_error(status: int, data: dict) -> bool:
     return status in (401, 403) or str(data.get("errCode")) in AUTH_ERR_CODES
+
+
+def is_fatal(status: int, data: dict) -> bool:
+    """重試也不會好的錯：token 死了、專屬代碼錯、需要圖形驗證碼。"""
+    return is_auth_error(status, data) or str(data.get("errCode")) in CODE_ERR_CODES
 
 
 def _post(session: cf_requests.Session, url: str, payload: dict, token: str,
@@ -114,7 +128,7 @@ def enqueue(session: cf_requests.Session, payload: dict, token: str,
             print(f"[ENQUEUE] ✅ 排到了！（第 {attempt} 次，共排 {waited:.1f}s，"
                   f"RTT {rtt:.0f}ms） uuid={data.get('uuid')}")
             return {"uuid": data.get("uuid"), "queue_s": waited}
-        if is_auth_error(status, data):
+        if is_fatal(status, data):
             return {"error": f"errCode={data.get('errCode')} {describe(data.get('errCode'))}",
                     "fatal": True}
         wait = data.get("waitSecond")
@@ -146,18 +160,25 @@ def reserve(session: cf_requests.Session, payload: dict, uuid: str, token: str,
                   f"（第 {attempt} 次，耗時 {spent:.1f}s，RTT {rtt:.0f}ms）")
             return {"orderId": data["orderId"], "raw": data, "reserve_s": spent}
         code = str(data.get("errCode"))
-        if is_auth_error(status, data):
+        if is_fatal(status, data):
             return {"error": f"errCode={code} {describe(code)}", "fatal": True}
         if code == "999":
             # 前端 axios catch 用的碼 → 網路/HTTP 層問題，不是票的問題，值得重試
             print(f"[RESERVE] {describe(code)}，{default_wait}s 後重試（第 {attempt} 次）")
             time.sleep(default_wait)
             continue
-        if code in QUEUE_WAIT_CODES or status != 200:
-            # 137 = 官方還在配位（前端這時候也是不關 loading 繼續等）
+        if code in QUEUE_WAIT_CODES:
+            # 官方前端在這裡是「回頭重新 enqueue」而不是拿舊 uuid 重打（errorHandler
+            # 的 137 分支：`"reserve"===t ? enquene() : nextStep(s)`）。uuid 是排隊憑證，
+            # 過期的憑證再打幾次都不會變成訂單，得重新排一次拿新的。
             wait = float(data.get("waitSecond") or default_wait)
-            print(f"[RESERVE] ⏳ 配位中… {wait}s 後再確認"
-                  f"（第 {attempt} 次，RTT {rtt:.0f}ms）")
+            print(f"[RESERVE] ⏳ 還在排隊中… {wait}s 後重新排隊（第 {attempt} 次，"
+                  f"RTT {rtt:.0f}ms）")
+            time.sleep(wait)
+            return {"requeue": True}
+        if status != 200:
+            wait = float(data.get("waitSecond") or default_wait)
+            print(f"[RESERVE] HTTP {status}，{wait}s 後重試（第 {attempt} 次）")
             time.sleep(wait)
             continue
         return {"error": f"errCode={code} {describe(code)}",
@@ -165,17 +186,25 @@ def reserve(session: cf_requests.Session, payload: dict, uuid: str, token: str,
     return {"error": f"reserve 超過 {max_wait}s 未成功"}
 
 
-def grab(session: cf_requests.Session, payload: dict, token: str) -> dict:
-    """enqueue → reserve 一條龍。回 {"orderId": …, "queue_s", "reserve_s"} 或 {"error": …}。"""
-    queued = enqueue(session, payload, token)
-    if queued.get("error"):
-        return queued
-    if queued.get("currentReservedOrderId"):
-        return {"orderId": queued["currentReservedOrderId"], "resumed": True,
-                "queue_s": queued.get("queue_s", 0.0), "reserve_s": 0.0}
-    result = reserve(session, payload, queued["uuid"], token)
-    result.setdefault("queue_s", queued.get("queue_s", 0.0))
-    return result
+def grab(session: cf_requests.Session, payload: dict, token: str,
+         max_requeue: int = 5) -> dict:
+    """enqueue → reserve 一條龍。回 {"orderId": …, "queue_s", "reserve_s"} 或 {"error": …}。
+    reserve 回「還在排隊」時整個循環重來（重新 enqueue 拿新 uuid），最多 max_requeue 次。"""
+    queue_s = 0.0
+    for round_no in range(1, max_requeue + 1):
+        queued = enqueue(session, payload, token)
+        if queued.get("error"):
+            return queued
+        if queued.get("currentReservedOrderId"):
+            return {"orderId": queued["currentReservedOrderId"], "resumed": True,
+                    "queue_s": queue_s + queued.get("queue_s", 0.0), "reserve_s": 0.0}
+        queue_s += queued.get("queue_s", 0.0)
+        result = reserve(session, payload, queued["uuid"], token)
+        if not result.get("requeue"):
+            result["queue_s"] = queue_s
+            return result
+        print(f"[GRAB] 重新排隊（第 {round_no}/{max_requeue} 輪）")
+    return {"error": f"重新排隊 {max_requeue} 輪仍未拿到訂單"}
 
 
 def _to_epoch(value) -> float | None:

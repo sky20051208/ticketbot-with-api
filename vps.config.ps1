@@ -10,9 +10,14 @@ $VpsInstanceOcid = "ocid1.instance.oc1.iad.anuwcljt76jdqbycacjhwpbb2z2sshgrrf3bw
 $VpsUser    = "ubuntu"
 $VpsKeyPath = "$env:USERPROFILE\.ssh\ticket-ohio.pem"
 
-# 本機要轉發的埠（左邊本機 = 右邊 VM，兩邊同號比較好記）
-$VpsGuiPort = 7860      # War-Room webgui
-$VpsVncPort = 6080      # noVNC，換帳號重登 / 看結帳頁時用
+# 埠對應：本機這一側刻意錯開，才能「本機 War-Room（KKTIX/寬宏/TicketPlus）」和
+# 「美東 War-Room（拓元）」同時開著 —— 兩邊 webgui 都是 7860，不錯開會搶同一個本機埠。
+#   http://localhost:7860  → 本機的 War-Room（這支腳本不碰）
+#   http://localhost:7861  → 美東 VPS 的 War-Room
+$VpsGuiLocalPort  = 7861
+$VpsGuiRemotePort = 7860
+$VpsVncLocalPort  = 6080   # noVNC，換帳號重登 / 看結帳頁時用
+$VpsVncRemotePort = 6080
 
 # 開機後等 SSH 起來的上限（OCI 冷開機實測約 60~90 秒）
 $VpsBootTimeoutSec = 240

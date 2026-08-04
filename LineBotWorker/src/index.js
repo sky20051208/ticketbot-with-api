@@ -290,8 +290,15 @@ async function handleGetImage(env, id) {
   }
   // D1 撈回的 BLOB 直接塞給 Response 會被當成數字陣列字串化（逗號分隔），
   // 明確包成 Uint8Array 才會正確輸出成 binary。
-  return new Response(new Uint8Array(row.data), {
-    headers: { "Content-Type": "image/png", "Cache-Control": "private, max-age=3600" },
+  const data = new Uint8Array(row.data);
+  // 依實際位元組判 content-type：大截圖 Python 端會壓成 JPEG（FF D8），小的維持 PNG。
+  // content-type 要跟實際格式一致，否則 LINE 抓圖可能拒絕。
+  const isJpeg = data[0] === 0xff && data[1] === 0xd8;
+  return new Response(data, {
+    headers: {
+      "Content-Type": isJpeg ? "image/jpeg" : "image/png",
+      "Cache-Control": "private, max-age=3600",
+    },
   });
 }
 

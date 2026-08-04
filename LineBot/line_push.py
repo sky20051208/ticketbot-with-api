@@ -7,6 +7,8 @@
 """
 import json
 import time
+import base64
+import asyncio
 
 import requests
 from selenium.webdriver.common.by import By
@@ -78,12 +80,44 @@ def push_image(user_id: str, image_url: str) -> bool:
     return False
 
 
+# 圖床（Cloudflare D1）單筆 BLOB 有上限，整頁截圖（尤其含座位圖的長頁）PNG 常破 1MB，
+# INSERT 會回 500。上傳前先確保夠小：太大就等比縮寬 + 轉 JPEG（Worker 依實際位元組回
+# 正確 content-type，見 LineBotWorker/src/index.js handleGetImage）。
+_MAX_UPLOAD_BYTES = 900_000
+
+
+def _shrink_for_upload(image_bytes: bytes) -> bytes:
+    """截圖 > 上限就壓到上限內：先等比縮寬（1080→900→760），每級再降 JPEG 品質。
+    已經夠小就原樣回傳（維持 PNG，tixcraft 小截圖不受影響）。Pillow 出問題就原樣回。"""
+    if len(image_bytes) <= _MAX_UPLOAD_BYTES:
+        return image_bytes
+    try:
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        for width in (1080, 900, 760):
+            w = min(width, im.width)
+            small = im.resize((w, int(im.height * w / im.width)))
+            for q in (80, 70, 60, 45):
+                buf = io.BytesIO()
+                small.save(buf, "JPEG", quality=q)
+                if buf.tell() <= _MAX_UPLOAD_BYTES:
+                    print(f"[LINE] 截圖 {len(image_bytes)//1024}KB 過大，"
+                          f"壓成 JPEG {small.size[0]}px q{q} = {buf.tell()//1024}KB")
+                    return buf.getvalue()
+        return buf.getvalue()   # 保底：最狠那級還是回出去，讓上傳端決定
+    except Exception as e:
+        print(f"[LINE] 截圖壓縮失敗（原樣上傳）: {type(e).__name__}: {e}")
+        return image_bytes
+
+
 def upload_screenshot(image_bytes: bytes) -> str | None:
     """上傳截圖到 LineBotWorker 暫存（1 小時後自動失效），回傳可公開存取的網址。
     LINE 圖片訊息一定要公開 HTTPS 網址，本機 Python 沒有，借 Worker 當臨時圖床。失敗回 None。"""
     if not config.LINE_WORKER_URL:
         print("[LINE] 沒設定 LINE_WORKER_URL，略過截圖上傳")
         return None
+    image_bytes = _shrink_for_upload(image_bytes)
     try:
         res = requests.post(
             f"{config.LINE_WORKER_URL}/api/screenshot",
@@ -169,22 +203,70 @@ def notify_checkout_from_driver(user_id: str, driver) -> bool:
     return push_image(user_id, url)
 
 
-def notify_grabbed(user_id: str, *, slug: str, amount: str, fee: str) -> bool:
-    """搶到票的制式通知：匯款資訊 + 自行登入結帳指示（10 分鐘期限）。"""
+async def _capture_page_nodriver(tab, width: int = 1280) -> bytes:
+    """nodriver（CDP）版整頁截圖。跟 selenium 的 _capture_confirmation_area 對應，
+    但 nodriver 沒有 selenium 那套 find_element/set_window_size，改走 CDP：
+      先用 setDeviceMetricsOverride 把 layout 寬度拉到 1280（多開時視窗可能很窄，窄版會
+      reflow 成手機排版、字很小），再用 capture_beyond_viewport 一次截完整頁確認資訊。"""
+    from nodriver import cdp
+    await tab.send(cdp.emulation.set_device_metrics_override(
+        width=width, height=900, device_scale_factor=1, mobile=False))
+    await asyncio.sleep(0.5)   # 等寬度變化後版面 reflow
+    data = await tab.send(cdp.page.capture_screenshot(
+        format_="png", capture_beyond_viewport=True))
+    try:
+        await tab.send(cdp.emulation.clear_device_metrics_override())
+    except Exception:
+        pass
+    return base64.b64decode(data)
+
+
+async def notify_checkout_from_tab(user_id: str, tab) -> bool:
+    """從 nodriver tab 截結帳確認頁並推播給客人（TicketPlus / KKTIX 等 nodriver 平台用）。
+    對應 selenium 的 notify_checkout_from_driver。任何一步失敗都不 raise——票已到手。"""
+    if not user_id:
+        return False
+    try:
+        image_bytes = await _capture_page_nodriver(tab)
+    except Exception as e:
+        print(f"[LINE] 結帳頁截圖失敗（nodriver）: {type(e).__name__}: {e}")
+        return False
+    url = upload_screenshot(image_bytes)
+    if not url:
+        return False
+    return push_image(user_id, url)
+
+
+# 各平台「自行結帳」指示不同：站名 / 登入網址 / 訂單路徑 / 系統保留分鐘數
+_SITE_INFO = {
+    "TIXCRAFT":   ("拓元",           "https://tixcraft.com/",        "會員專區 → 訂單管理 → 完成付款",   10),
+    "TICKETPLUS": ("遠大 TicketPlus", "https://ticketplus.com.tw/",   "會員中心 → 我的訂單 → 完成付款",   10),
+    "KKTIX":      ("KKTIX",          "https://kktix.com/",           "我的票券 → 完成付款",              None),
+}
+
+
+def notify_grabbed(user_id: str, *, slug: str, amount: str, fee: str,
+                   platform: str = "TIXCRAFT") -> bool:
+    """搶到票的制式通知：匯款資訊 + 自行登入結帳指示。各平台保留時限/登入頁不同。"""
+    site_name, site_url, path_hint, hold_min = _SITE_INFO.get(
+        platform, _SITE_INFO["TIXCRAFT"])
+    limit_txt = f"只保留 {hold_min} 分鐘" if hold_min else "有結帳時限"
+    tail_txt = (f"⚠️ 超過 {hold_min} 分鐘票會被系統釋出" if hold_min
+                else "⚠️ 逾時票會被系統釋出")
     fee_line = f"{fee} 元" if fee else "（依約定金額）"
     text = (
         "🎫 搶票成功！\n"
         f"活動：{slug}\n"
         f"張數：{amount} 張\n"
-        "票已進入結帳流程，系統只保留 10 分鐘，請立刻完成以下兩步：\n"
+        f"票已進入結帳流程，系統{limit_txt}，請立刻完成以下兩步：\n"
         "\n"
         f"1️⃣ 匯款搶票費 {fee_line}\n"
         f"{config.PAYMENT_INFO}\n"
         "備註請打上您的thread名（方便對帳）\n"
         "\n"
-        "2️⃣ 匯款後馬上登入你的拓元帳號\n"
-        "https://tixcraft.com/ → 會員專區 → 訂單管理 → 完成付款\n"
+        f"2️⃣ 匯款後馬上登入你的{site_name}帳號\n"
+        f"{site_url} → {path_hint}\n"
         "\n"
-        "⚠️ 超過 10 分鐘票會被系統釋出，請把握時間，匯款後回傳截圖！"
+        f"{tail_txt}，請把握時間，匯款後回傳截圖！"
     )
     return push_text(user_id, text)

@@ -93,7 +93,19 @@ DevTools → Application → Cookies → `user`。`extract_token()` 吃整串 co
   `reserve.ERR_MESSAGES`（官方沒文件，是拿前端 `errorHandler` 的分支 × `/assets/lang/tw.json`
   的訊息湊出來的）。特別注意 **999 不是伺服器回的** —— 是前端 axios `.catch()` 自己捏的碼，
   代表網路/HTTP 層掛了，該重試不該當成沒票；121 同理也是前端自產
-- 搶到後票只保留 **15 分鐘**，逾時自動釋放；要主動放掉打 `POST ticket/api/v1/release` `{orderId, culturePointInfo:{}}`
+- 搶到後票只保留 **15 分鐘**（實測有活動設 10 分鐘，以 reserve 回應的 `expiryTimestamp` 為準），逾時自動釋放；要主動放掉打 `POST ticket/api/v1/release` `{orderId, culturePointInfo:{}}`
+- **專屬代碼 / 序號**（`PRESALE_CODE` → `payload.serialNumber`，enqueue 跟 reserve 都要帶）：
+  欄位只在 `hasSerial && transactionValidType` 都成立時渲染 —— 票種的 `serialKey` 非空
+  **且** `session.transactionValidType` 非空（它的值就是那個 serialKey，例如 `sk00000433`）。
+  說明文字在 `session.SNDescription[serialKey][語系]`。填錯回 **124**、已被用過回 **125**，
+  兩者都標 fatal（重試無用）；`build_plan` 會在開賣前先查 `serialKey` 預警。
+  **實測結論（2026-08 掃過全站 90 場活動 / 1746 個票種）：這機制實務上是「加購序號」不是
+  「會員優先購搶門票」** —— 只有 6 場在用，全部是 VIP PASS / 手燈 / 特典這類周邊加購
+  （文案就寫「加購序號」「預購序號」，價格 0/1/900/1800），序號是用來證明「你是有票的人」
+  防黃牛掃周邊的。**搶門票沒有需要打會員碼的場次**，`PRESALE_CODE` 平常留空即可。
+  另外前端有「問答題模式」（票種帶 `hint` → 欄位變答案欄）但 1746 個票種裡 `hint` 全是空的，
+  等於沒人在用，別為它花時間
+- **圖形驗證碼**：errCode **135**（驗證失敗）/ **136**（已過期）代表這場有 captcha（`api/captcha/api/v1/generate`，另有 reCAPTCHA sitekey 在 bundle 裡）。本 bot **未實作**，遇到只能中止 —— 目前實測的活動都沒觸發
 - 送單成功後**直接導結帳確認頁**（`browser_session.checkout_url`）：有劃位 → `/confirmSeat/<加密eventId>/<加密sessionId>`（ConfirmSt），無劃位 → `/confirm/…`（Order2），跟前端 `nextStep` 自己的路由判斷一致。這兩頁 `init()` 會先打 `getUserCurrentReservedOrder`，有保留中的訂單就 `setReservedData()` 純從伺服器重建（**不依賴搶票當下的前端狀態**），沒訂單才自己退回 Order1 —— 所以直接跳是安全的，不用先繞 Order1
 
 ## Cookie 來源（兩種）

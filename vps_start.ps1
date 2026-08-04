@@ -97,15 +97,15 @@ if (Test-Path $VpsTunnelPidFile) {
     Remove-Item $VpsTunnelPidFile -ErrorAction SilentlyContinue
 }
 
-Say "建立 SSH 通道（webgui $VpsGuiPort / noVNC $VpsVncPort）"
+Say "建立 SSH 通道（webgui $VpsGuiLocalPort / noVNC $VpsVncLocalPort）"
 # accept-new：IP 每次都換，不預先接受主機金鑰的話 ssh 會停在互動提示等輸入
 $sshArgs = @(
     "-N",
     "-i", "`"$VpsKeyPath`"",
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ServerAliveInterval=30",
-    "-L", "$($VpsGuiPort):127.0.0.1:$VpsGuiPort",
-    "-L", "$($VpsVncPort):127.0.0.1:$VpsVncPort",
+    "-L", "$($VpsGuiLocalPort):127.0.0.1:$VpsGuiRemotePort",
+    "-L", "$($VpsVncLocalPort):127.0.0.1:$VpsVncRemotePort",
     "$VpsUser@$ip"
 )
 $tunnel = Start-Process ssh -ArgumentList $sshArgs -PassThru -WindowStyle Minimized
@@ -114,7 +114,7 @@ Start-Sleep -Seconds 3
 
 # --- 5. 等 webgui 真的回應（systemd 起服務也要幾秒）---
 Say "等待 War-Room 就緒"
-if (-not (Wait-Port "127.0.0.1" $VpsGuiPort 90)) {
+if (-not (Wait-Port "127.0.0.1" $VpsGuiLocalPort 90)) {
     Write-Host ""
     Warn "通道通了但 webgui 沒回應。上去看 systemctl status tixcraft-webgui："
     Write-Host "    ssh -i $VpsKeyPath $VpsUser@$ip"
@@ -122,11 +122,11 @@ if (-not (Wait-Port "127.0.0.1" $VpsGuiPort 90)) {
 }
 Write-Host ""
 
-Start-Process "http://localhost:$VpsGuiPort"
+Start-Process "http://localhost:$VpsGuiLocalPort"
 
 Write-Host ""
-Write-Host "  War-Room : http://localhost:$VpsGuiPort" -ForegroundColor Green
-Write-Host "  遠端畫面 : http://localhost:$VpsVncPort/vnc.html  （換帳號重登 / 看結帳頁時用）"
+Write-Host "  美東 War-Room : http://localhost:$VpsGuiLocalPort  （拓元）" -ForegroundColor Green
+Write-Host "  遠端畫面      : http://localhost:$VpsVncLocalPort/vnc.html  （換帳號重登 / 看結帳頁時用）"
 Write-Host "  SSH      : ssh -i $VpsKeyPath $VpsUser@$ip"
 Write-Host ""
 Write-Host "  用完請執行 .\vps_stop.ps1 關機 —— 忘記關是每月 76 美金 vs 3 美金的差別" -ForegroundColor Yellow
