@@ -232,7 +232,7 @@ EOF
 
 # x11vnc + noVNC：需要「用眼睛看」時（換帳號重登、檢查結帳頁）從瀏覽器連 :6080。
 # 只 bind localhost，一律走 SSH 通道進來，不對外開埠。
-sudo apt-get install -y -qq x11vnc novnc websockify openbox tint2
+sudo apt-get install -y -qq x11vnc novnc websockify openbox tint2 zenity thunar
 # 視窗管理器：Xvfb 只負責畫，標題列 / 最小化 / 關閉鈕 / 拖曳縮放全是 WM 的事。
 # 沒有 WM 的話遠端看到的 Chrome 是一塊沒有邊框、也動不了的畫面。openbox 約 2MB。
 # 但 openbox 只有 WM 沒有工作列 —— 按了最小化的視窗會直接消失，而且沒有任何入口
@@ -255,8 +255,12 @@ WantedBy=multi-user.target
 EOF
 
 mkdir -p "$HOME/.config/tint2"
-cat > "$HOME/.config/tint2/tint2rc" <<'EOF'
-# 只留 Taskbar / Systray / Clock，不放啟動器：要開什麼都是 webgui 自己 spawn 的。
+# 這份 heredoc 沒有加引號，$HOME 要展開（launcher 的 .desktop 路徑必須是絕對路徑）。
+# tint2rc 裡沒有其他 $ 或反引號，展開不會咬到別的東西。
+cat > "$HOME/.config/tint2/tint2rc" <<EOF
+# L=Launcher T=Taskbar S=Systray C=Clock。
+# 有 Launcher 是因為 profile 一定要在這台機器上建（eps_sid 綁出口 IP），而
+# create_profile.py 是互動式的 —— 沒有可以點的入口就得每次自己 ssh 進來打指令。
 # 背景樣式要寫在被引用之前，id 由上而下從 1 開始編（id 0 是內建的全透明）。
 rounded = 0
 border_width = 0
@@ -273,7 +277,7 @@ border_width = 0
 background_color = #3a6eaf 100
 border_color = #000000 0
 
-panel_items = TSC
+panel_items = LTSC
 panel_position = bottom center horizontal
 panel_size = 100% 32
 panel_margin = 0 0
@@ -282,6 +286,15 @@ panel_background_id = 1
 panel_layer = top
 panel_monitor = all
 wm_menu = 1
+
+launcher_icon_size = 22
+launcher_padding = 6 2 6
+launcher_background_id = 0
+launcher_icon_theme = Adwaita
+launcher_tooltip = 1
+launcher_item_app = $HOME/.local/share/applications/tixcraft-new-profile.desktop
+launcher_item_app = $HOME/.local/share/applications/tixcraft-profiles-folder.desktop
+launcher_item_app = /usr/share/applications/xfce4-terminal.desktop
 
 taskbar_mode = single_desktop
 taskbar_padding = 2 0 2
@@ -308,6 +321,53 @@ clock_padding = 6 0
 
 mouse_middle = close
 mouse_right = toggle_iconify
+EOF
+
+# 桌面入口：工作列的啟動鈕 + 桌面空白處右鍵選單，兩邊指到同一支腳本。
+# openbox 不畫桌面圖示（那是檔案管理器的工作），所以這兩個就是這台機器的「桌面捷徑」。
+chmod +x "$REPO_DIR/vps_desktop/new-profile.sh" 2>/dev/null || true
+mkdir -p "$HOME/.local/share/applications"
+cat > "$HOME/.local/share/applications/tixcraft-new-profile.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=建立 Chrome Profile
+Comment=幫一個購票帳號建立獨立的 Chrome 登入 profile（一定要在這台機器上建）
+Exec=$REPO_DIR/vps_desktop/new-profile.sh
+Icon=contact-new
+Terminal=false
+Categories=Utility;
+EOF
+cat > "$HOME/.local/share/applications/tixcraft-profiles-folder.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Profile 資料夾
+Comment=瀏覽 chrome_profiles/（刪掉某個帳號的登入態就是刪這裡的資料夾）
+Exec=thunar $REPO_DIR/chrome_profiles
+Icon=folder
+Terminal=false
+Categories=Utility;
+EOF
+
+mkdir -p "$HOME/.config/openbox"
+cat > "$HOME/.config/openbox/menu.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+<menu id="root-menu" label="tixcraft">
+  <item label="建立 Chrome Profile">
+    <action name="Execute"><execute>$REPO_DIR/vps_desktop/new-profile.sh</execute></action>
+  </item>
+  <item label="Profile 資料夾">
+    <action name="Execute"><execute>thunar $REPO_DIR/chrome_profiles</execute></action>
+  </item>
+  <item label="終端機">
+    <action name="Execute"><execute>xfce4-terminal</execute></action>
+  </item>
+  <separator/>
+  <item label="重新載入桌面設定">
+    <action name="Reconfigure"/>
+  </item>
+</menu>
+</openbox_menu>
 EOF
 
 sudo tee /etc/systemd/system/tint2.service > /dev/null <<EOF
