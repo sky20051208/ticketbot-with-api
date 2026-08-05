@@ -146,9 +146,11 @@ EOF
 
 # x11vnc + noVNC：需要「用眼睛看」時（換帳號重登、檢查結帳頁）從瀏覽器連 :6080。
 # 只 bind localhost，一律走 SSH 通道進來，不對外開埠。
-sudo apt-get install -y -qq x11vnc novnc websockify openbox
+sudo apt-get install -y -qq x11vnc novnc websockify openbox tint2
 # 視窗管理器：Xvfb 只負責畫，標題列 / 最小化 / 關閉鈕 / 拖曳縮放全是 WM 的事。
 # 沒有 WM 的話遠端看到的 Chrome 是一塊沒有邊框、也動不了的畫面。openbox 約 2MB。
+# 但 openbox 只有 WM 沒有工作列 —— 按了最小化的視窗會直接消失，而且沒有任何入口
+# 叫得回來（實際踩到）。tint2 就是補那條入口。
 sudo tee /etc/systemd/system/openbox.service > /dev/null <<EOF
 [Unit]
 Description=Openbox window manager on :99
@@ -159,6 +161,79 @@ Requires=xvfb.service
 User=$USER
 Environment=DISPLAY=:99
 ExecStart=/usr/bin/openbox
+Restart=always
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+mkdir -p "$HOME/.config/tint2"
+cat > "$HOME/.config/tint2/tint2rc" <<'EOF'
+# 只留 Taskbar / Systray / Clock，不放啟動器：要開什麼都是 webgui 自己 spawn 的。
+# 背景樣式要寫在被引用之前，id 由上而下從 1 開始編（id 0 是內建的全透明）。
+rounded = 0
+border_width = 0
+background_color = #2b2f38 100
+border_color = #000000 0
+
+rounded = 2
+border_width = 0
+background_color = #454b58 100
+border_color = #000000 0
+
+rounded = 2
+border_width = 0
+background_color = #3a6eaf 100
+border_color = #000000 0
+
+panel_items = TSC
+panel_position = bottom center horizontal
+panel_size = 100% 32
+panel_margin = 0 0
+panel_padding = 4 2 4
+panel_background_id = 1
+panel_layer = top
+panel_monitor = all
+wm_menu = 1
+
+taskbar_mode = single_desktop
+taskbar_padding = 2 0 2
+taskbar_background_id = 0
+
+# 標題留寬一點：同時開多隻 Chrome 時要靠標題分辨是哪個帳號的視窗
+task_maximum_size = 260 30
+task_padding = 6 2 6
+task_font = sans 10
+task_font_color = #dddddd 100
+task_background_id = 2
+task_active_background_id = 3
+task_icon = 1
+task_text = 1
+task_centered = 0
+
+systray_padding = 4 2 4
+systray_icon_size = 20
+
+time1_format = %H:%M
+time1_font = sans 10
+clock_font_color = #dddddd 100
+clock_padding = 6 0
+
+mouse_middle = close
+mouse_right = toggle_iconify
+EOF
+
+sudo tee /etc/systemd/system/tint2.service > /dev/null <<EOF
+[Unit]
+Description=tint2 taskbar on :99
+After=openbox.service
+Requires=openbox.service
+
+[Service]
+User=$USER
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/tint2
 Restart=always
 TimeoutStopSec=10
 
@@ -202,13 +277,13 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable xvfb.service openbox.service x11vnc.service novnc.service tixcraft-webgui.service
+sudo systemctl enable xvfb.service openbox.service tint2.service x11vnc.service novnc.service tixcraft-webgui.service
 # 一定要 restart 不能只 enable --now —— 對已經在跑的服務，`--now` 不會重啟，
 # 改寫的 unit 檔就靜靜地不生效（踩過一次：改了 websockify 的綁定位址卻沒套上）。
 # 這支是維護腳本，跑的時候不該有搶票在進行。
-sudo systemctl restart xvfb.service openbox.service x11vnc.service novnc.service tixcraft-webgui.service
+sudo systemctl restart xvfb.service openbox.service tint2.service x11vnc.service novnc.service tixcraft-webgui.service
 sleep 3
-systemctl is-active xvfb openbox x11vnc novnc tixcraft-webgui | tr '\n' ' '; echo
+systemctl is-active xvfb openbox tint2 x11vnc novnc tixcraft-webgui | tr '\n' ' '; echo
 
 log "完成"
 cat <<EOF
