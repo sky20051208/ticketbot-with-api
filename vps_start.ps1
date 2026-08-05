@@ -80,6 +80,16 @@ $vnic = & oci compute instance list-vnics --instance-id $VpsInstanceOcid | Conve
 $ip = $vnic.data[0].'public-ip'
 if (-not $ip) { Warn "拿不到公網 IP"; exit 1 }
 Write-Host "    $ip"
+# 留給 vps_moonlight.ps1 讀，省它再查一次 OCI
+Set-Content -Path $VpsIpFile -Value $ip -Encoding ascii
+
+# --- 2b. 串流埠的來源 IP 白名單 ---
+# Sunshine 走 UDP，穿不了 SSH 通道，所以那幾個埠一定得對外開。把來源鎖在「你家當下
+# 的對外 IP」，並且每次開機都同步 —— 家用 IP 本來就會變（搬家、ISP 重撥），
+# 靠手動維護白名單遲早會忘。失敗不擋開機流程，VNC 那條路仍然可用。
+Say "同步串流埠的來源 IP 白名單"
+& (Join-Path $PSScriptRoot "sync_stream_ip.ps1")
+if ($LASTEXITCODE -ne 0) { Warn "同步失敗 —— Moonlight 可能連不上，但 VNC 不受影響" }
 
 # --- 3. 等 SSH ---
 Say "等待 SSH（機器開機後服務還要幾十秒才會就緒）"
@@ -97,7 +107,7 @@ if (Test-Path $VpsTunnelPidFile) {
     Remove-Item $VpsTunnelPidFile -ErrorAction SilentlyContinue
 }
 
-Say "建立 SSH 通道（webgui $VpsGuiLocalPort / noVNC $VpsVncLocalPort / VNC $VpsVncRawLocalPort）"
+Say "建立 SSH 通道（webgui $VpsGuiLocalPort / noVNC $VpsVncLocalPort / VNC $VpsVncRawLocalPort / Sunshine UI $VpsSunshineLocalPort）"
 # accept-new：IP 每次都換，不預先接受主機金鑰的話 ssh 會停在互動提示等輸入
 $sshArgs = @(
     "-N",
@@ -107,6 +117,8 @@ $sshArgs = @(
     "-L", "$($VpsGuiLocalPort):127.0.0.1:$VpsGuiRemotePort",
     "-L", "$($VpsVncLocalPort):127.0.0.1:$VpsVncRemotePort",
     "-L", "$($VpsVncRawLocalPort):127.0.0.1:$VpsVncRawRemotePort",
+    # Sunshine 的網頁管理介面（配對新裝置時輸入 PIN）。它只聽本機，刻意不對外開埠。
+    "-L", "$($VpsSunshineLocalPort):127.0.0.1:$VpsSunshineRemotePort",
     "$VpsUser@$ip"
 )
 $tunnel = Start-Process ssh -ArgumentList $sshArgs -PassThru -WindowStyle Minimized
@@ -127,8 +139,10 @@ Start-Process "http://localhost:$VpsGuiLocalPort"
 
 Write-Host ""
 Write-Host "  美東 War-Room : http://localhost:$VpsGuiLocalPort  （拓元）" -ForegroundColor Green
-Write-Host "  遠端畫面(快)  : VNC 客戶端連 localhost:$VpsVncRawLocalPort  ← 高延遲下比瀏覽器版順很多"
-Write-Host "  遠端畫面(免裝): http://localhost:$VpsVncLocalPort/vnc.html"
+Write-Host "  遠端桌面(最順): 面板的「遠端桌面」鈕，或 vps_moonlight.bat  ← H.264，實測 60fps"
+Write-Host "  遠端桌面(備援): VNC 客戶端連 localhost:$VpsVncRawLocalPort  （上限約 16fps，但只需要 22 埠）"
+Write-Host "  遠端桌面(免裝): http://localhost:$VpsVncLocalPort/vnc.html"
+Write-Host "  Sunshine 設定 : https://localhost:$VpsSunshineLocalPort  （配對新裝置時輸入 PIN）"
 Write-Host "  SSH           : ssh -i $VpsKeyPath $VpsUser@$ip"
 Write-Host ""
 Write-Host "  用完請執行 .\vps_stop.ps1 關機 —— 忘記關是每月 76 美金 vs 3 美金的差別" -ForegroundColor Yellow

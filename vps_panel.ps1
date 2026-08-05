@@ -73,22 +73,31 @@ $btnStop = New-Button "■  關機" ([System.Drawing.Color]::FromArgb(200, 55, 5
 $btnStop.Add_Click({ Start-Bat "vps_stop.bat" })
 $form.Controls.Add($btnStop)
 
-# 遠端桌面走原生 VNC 客戶端而不是瀏覽器裡的 noVNC —— 台灣↔Ashburn 來回 200ms，
-# noVNC 用 JS 重畫 canvas 在這種延遲下特別鈍。通道沒開時 bat 會自己擋下來。
-$btnVnc = New-Button "▣  遠端桌面" ([System.Drawing.Color]::FromArgb(58, 110, 175)) 191
-$btnVnc.Add_Click({ Start-Bat "vps_vnc.bat" })
-$form.Controls.Add($btnVnc)
+# 遠端桌面主力走 H.264（Sunshine + Moonlight）。VNC 是「每張畫面各自壓縮」的靜態圖
+# 編碼，實測捲一次頁面 131KB，在這條 2.1MB/s 的路上 16fps 就是天花板；H.264 做影格間
+# 預測，同一段捲動 60fps 只吃 3.9Mbps。VNC 留在下面當備援 —— 它走 SSH 通道，
+# 在只有 22 埠通得出去的網路（公司 / 飯店）是唯一還能用的路。
+$btnRemote = New-Button "▣  遠端桌面" ([System.Drawing.Color]::FromArgb(58, 110, 175)) 191
+$btnRemote.Add_Click({ Start-Bat "vps_moonlight.bat" })
+$form.Controls.Add($btnRemote)
 
-$btnRefresh = New-Object System.Windows.Forms.Button
-$btnRefresh.Text = "重新整理狀態"
-$btnRefresh.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$btnRefresh.ForeColor = [System.Drawing.Color]::White
-$btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(60, 68, 82)
-$btnRefresh.FlatStyle = "Flat"
-$btnRefresh.FlatAppearance.BorderSize = 0
-$btnRefresh.Location = New-Object System.Drawing.Point(20, 248)
-$btnRefresh.Size = New-Object System.Drawing.Size(305, 26)
-$form.Controls.Add($btnRefresh)
+function New-SmallButton($text, $x, $w) {
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $text
+    $b.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $b.ForeColor = [System.Drawing.Color]::White
+    $b.BackColor = [System.Drawing.Color]::FromArgb(60, 68, 82)
+    $b.FlatStyle = "Flat"
+    $b.FlatAppearance.BorderSize = 0
+    $b.Location = New-Object System.Drawing.Point($x, 248)
+    $b.Size = New-Object System.Drawing.Size($w, 26)
+    $form.Controls.Add($b)
+    return $b
+}
+
+$btnRefresh = New-SmallButton "重新整理狀態" 20 178
+$btnVnc     = New-SmallButton "VNC 備援" 205 120
+$btnVnc.Add_Click({ Start-Bat "vps_vnc.bat" })
 
 function Update-State {
     $lblState.Text = "查詢中…"

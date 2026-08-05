@@ -14,6 +14,8 @@ set -euo pipefail
 REPO_DIR="$HOME/ticketbot"
 VENV="$HOME/venv"
 SWAP_GB=4
+# 釘版本而不是抓 latest：串流參數（fec / preset / 埠）是對著這版調出來的
+SUNSHINE_VER=2026.516.143833
 
 log() { echo -e "\n\033[1;36m==> $*\033[0m"; }
 
@@ -360,20 +362,92 @@ TimeoutStopSec=10
 WantedBy=multi-user.target
 EOF
 
+# Sunshine：H.264 串流給 Moonlight 用。VNC 是「每張畫面各自壓縮」的靜態圖編碼，
+# 實測捲一次頁面要 131KB，在台灣↔Ashburn 這條 2.1MB/s 的路徑上只能跑 16fps。
+# H.264 做影格間預測，同一段捲動 60fps 只要 3.9Mbps —— 佔用率從 100% 掉到 23%。
+if ! command -v sunshine > /dev/null; then
+    curl -fsSL -o /tmp/sunshine.deb \
+        "https://github.com/LizardByte/Sunshine/releases/download/v${SUNSHINE_VER}/sunshine-ubuntu-24.04-amd64.deb"
+    sudo apt-get install -y -qq /tmp/sunshine.deb
+    rm -f /tmp/sunshine.deb
+fi
+# Sunshine 自帶的 /usr/lib/udev/rules.d/60-sunshine.rules 已經把 /dev/uinput 開給
+# input 群組，不要在 /etc 底下放同名檔案覆蓋它（會連 uhid、手把那幾條一起蓋掉）。
+mkdir -p "$HOME/.config/sunshine"
+cat > "$HOME/.config/sunshine/sunshine.conf" <<'EOF'
+# 這台沒有 GPU，只能軟體編碼
+encoder = software
+# superfast 是「畫質 vs 跟不跟得上 fps」的折衷。實測 1440x900@60 吃掉單核 82%
+# （總共有 4 核），再慢的 preset 會掉幀，ultrafast 畫質掉很多但省不到多少 CPU。
+sw_preset = superfast
+# 遠端桌面要的是低延遲不是壓縮率，關掉會累積延遲的前瞻 / B-frame
+sw_tune = zerolatency
+
+capture = x11
+
+# 網頁管理介面只聽本機 —— 走 SSH 通道進來，不對外開埠（47990 也刻意不在防火牆放行清單裡）
+origin_web_ui_allowed = pc
+
+# 預設 20 不夠：實測 26 秒掉一張影格就觸發
+# "Reference frame invalidation is not supported by this host"，
+# 整個畫面要等下一張關鍵影格才能恢復，在 200ms 的線路上就是一次可見的停頓。
+# 頻寬只用掉 23%，拿餘裕換穩定很划算。
+fec_percentage = 40
+
+min_log_level = info
+EOF
+
+sudo tee /etc/systemd/system/sunshine.service > /dev/null <<EOF
+[Unit]
+Description=Sunshine stream host (H.264 remote desktop for :99)
+After=xorg-dummy.service
+Requires=xorg-dummy.service
+
+[Service]
+User=$USER
+Environment=DISPLAY=:99
+SupplementaryGroups=input
+ExecStart=/usr/bin/sunshine
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+# T-0 時搶票進程一定要贏過編碼器 —— 使用者很可能一邊看畫面一邊搶票。
+# Nice 管 CPU 排程優先序，CPUWeight 管 cgroup 之間的 CPU 分配比例（預設 100）。
+Nice=10
+CPUWeight=20
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 主機防火牆。OCI 的 Ubuntu 映像檔在 INPUT 尾端有一條 REJECT 兜底，串流埠要插在它前面。
+# **48010/TCP 是 RTSP 交握**，漏掉的話配對得成、串流卻停在
+# "Connection timed out after 10 seconds (TCP port 48010)"（實際踩過）。
+# 來源限制交給 OCI Security List（sync_stream_ip.ps1 每次開機同步成你家當下的 IP）。
+_fw_add() {
+    sudo iptables -C INPUT "$@" 2>/dev/null && return 0
+    local n; n=$(sudo iptables -L INPUT --line-numbers -n | awk '/REJECT/{print $1; exit}')
+    sudo iptables -I INPUT "${n:-1}" "$@"
+}
+_fw_add -p tcp --dport 47984:47989 -j ACCEPT -m comment --comment sunshine-stream
+_fw_add -p tcp --dport 48010       -j ACCEPT -m comment --comment sunshine-rtsp
+_fw_add -p udp --dport 47998:48010 -j ACCEPT -m comment --comment sunshine-stream
+sudo netfilter-persistent save > /dev/null 2>&1 || true
+
 sudo systemctl daemon-reload
 # xvfb 只留 unit 檔當回退，不進開機清單 —— 它跟 xorg-dummy 互為 Conflicts，兩個都
 # enable 的話開機會互相把對方踢掉。
 sudo systemctl disable xvfb.service 2>/dev/null || true
 sudo systemctl stop xvfb.service 2>/dev/null || true
-sudo systemctl enable xorg-dummy.service openbox.service tint2.service x11vnc.service novnc.service tixcraft-webgui.service
+sudo systemctl enable xorg-dummy.service openbox.service tint2.service x11vnc.service novnc.service sunshine.service tixcraft-webgui.service
 # 一定要 restart 不能只 enable --now —— 對已經在跑的服務，`--now` 不會重啟，
 # 改寫的 unit 檔就靜靜地不生效（踩過一次：改了 websockify 的綁定位址卻沒套上）。
 # 這支是維護腳本，跑的時候不該有搶票在進行。
 sudo systemctl restart xorg-dummy.service
 sleep 2
-sudo systemctl restart openbox.service tint2.service x11vnc.service novnc.service tixcraft-webgui.service
+sudo systemctl restart openbox.service tint2.service x11vnc.service novnc.service sunshine.service tixcraft-webgui.service
 sleep 3
-systemctl is-active xorg-dummy openbox tint2 x11vnc novnc tixcraft-webgui | tr '\n' ' '; echo
+systemctl is-active xorg-dummy openbox tint2 x11vnc novnc sunshine tixcraft-webgui | tr '\n' ' '; echo
 DISPLAY=:99 xrandr 2>/dev/null | head -3 || echo "  !! xrandr 讀不到 :99"
 
 log "完成"
