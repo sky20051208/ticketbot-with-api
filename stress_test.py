@@ -147,33 +147,47 @@ def run_cpu(n_list):
 # mode: mem
 # --------------------------------------------------------------------------
 
-def _rss_kb(pid) -> int:
+def _pss_kb(pid) -> int:
+    """PSS 而不是 RSS。
+
+    RSS 會把共享分頁（共用函式庫、Chrome 各 process 之間共享的那一大塊）在每個
+    process 各算一次，把整棵子樹的 RSS 加起來會嚴重灌水 —— 第一版就是這樣量出
+    「每隻 Chrome 1GB、12 隻共 12.7GB」，但系統可用記憶體只掉了 3.5GB。
+    PSS 把每個共享分頁按共用者數量分攤，加總才等於實際佔用。
+    """
     try:
-        for line in open(f"/proc/{pid}/status"):
-            if line.startswith("VmRSS:"):
+        for line in open(f"/proc/{pid}/smaps_rollup"):
+            if line.startswith("Pss:"):
                 return int(line.split()[1])
     except Exception:
         pass
     return 0
 
 
-def _tree_rss_mb(root_pid) -> float:
-    """Chrome 是多進程的，只看主 pid 會嚴重低估。把整棵子樹加起來。"""
-    total = _rss_kb(root_pid)
+def _tree_pss_mb(root_pid) -> float:
+    """Chrome 是多進程的（browser / renderer / gpu / utility），只看主 pid 會嚴重低估。"""
+    total = _pss_kb(root_pid)
     try:
         children = subprocess.run(["pgrep", "-P", str(root_pid)],
                                   capture_output=True, text=True).stdout.split()
         for c in children:
-            total += int(_tree_rss_mb(int(c)) * 1024)
+            total += int(_tree_pss_mb(int(c)) * 1024)
     except Exception:
         pass
     return total / 1024
 
 
+def _mem_available_gb() -> float:
+    mem = dict(l.split(":", 1) for l in open("/proc/meminfo"))
+    return int(mem["MemAvailable"].split()[0]) / 1024 / 1024
+
+
 def run_mem(n_list):
-    print("\n開 N 隻 Chrome（各自獨立 user-data-dir，載入真實活動頁）量 RSS")
-    print("這對應 userdata 模式：每個搶票 instance 一隻 Chrome\n")
+    print("\n開 N 隻 Chrome（各自獨立 user-data-dir，載入真實活動頁）量 PSS")
+    print("這對應 userdata 模式：每個搶票 instance 一隻 Chrome")
+    print("兩個數字要對得起來：PSS 合計 ≈ 可用記憶體的下降量，對不上就是量錯了\n")
     for n in n_list:
+        base_avail = _mem_available_gb()
         procs, dirs = [], []
         for i in range(n):
             d = f"/tmp/stress_chrome_{i}"
@@ -185,13 +199,14 @@ def run_mem(n_list):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         time.sleep(25)     # 等頁面載完、記憶體用量穩定
 
-        per = [_tree_rss_mb(p.pid) for p in procs]
+        per = [_tree_pss_mb(p.pid) for p in procs]
         mem = dict(l.split(":", 1) for l in open("/proc/meminfo"))
-        avail_gb = int(mem["MemAvailable"].split()[0]) / 1024 / 1024
+        avail_gb = _mem_available_gb()
         swap_used_gb = (int(mem["SwapTotal"].split()[0]) - int(mem["SwapFree"].split()[0])) / 1024 / 1024
 
-        print(f"  N={n:>3}  每隻平均 {statistics.mean(per):>6.0f}MB  "
-              f"合計 {sum(per)/1024:>5.2f}GB  |  系統可用 {avail_gb:>5.2f}GB  swap 已用 {swap_used_gb:.2f}GB")
+        print(f"  N={n:>3}  每隻平均 {statistics.mean(per):>5.0f}MB  "
+              f"PSS 合計 {sum(per)/1024:>5.2f}GB  |  可用掉了 {base_avail - avail_gb:>5.2f}GB  "
+              f"（剩 {avail_gb:.2f}GB）  swap {swap_used_gb:.2f}GB")
 
         for p in procs:
             p.terminate()
