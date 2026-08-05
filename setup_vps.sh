@@ -102,12 +102,12 @@ log "常駐服務（開機自動起，本機腳本只要開機 + 開通道）"
 # （Selenium 那端只看得到 "Chrome instance exited"）。VPS 沒有實體螢幕，用虛擬的。
 sudo tee /etc/systemd/system/xvfb.service > /dev/null <<EOF
 [Unit]
-Description=Xvfb virtual display :99
+Description=Xvfb virtual display :99 (1440x900)
 After=network.target
 
 [Service]
 User=$USER
-ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1440x900x24
 Restart=always
 TimeoutStopSec=10
 
@@ -138,7 +138,26 @@ EOF
 
 # x11vnc + noVNC：需要「用眼睛看」時（換帳號重登、檢查結帳頁）從瀏覽器連 :6080。
 # 只 bind localhost，一律走 SSH 通道進來，不對外開埠。
-sudo apt-get install -y -qq x11vnc novnc websockify
+sudo apt-get install -y -qq x11vnc novnc websockify openbox
+# 視窗管理器：Xvfb 只負責畫，標題列 / 最小化 / 關閉鈕 / 拖曳縮放全是 WM 的事。
+# 沒有 WM 的話遠端看到的 Chrome 是一塊沒有邊框、也動不了的畫面。openbox 約 2MB。
+sudo tee /etc/systemd/system/openbox.service > /dev/null <<EOF
+[Unit]
+Description=Openbox window manager on :99
+After=xvfb.service
+Requires=xvfb.service
+
+[Service]
+User=$USER
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/openbox
+Restart=always
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 sudo tee /etc/systemd/system/x11vnc.service > /dev/null <<EOF
 [Unit]
 Description=x11vnc for display :99
@@ -175,13 +194,13 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable xvfb.service x11vnc.service novnc.service tixcraft-webgui.service
+sudo systemctl enable xvfb.service openbox.service x11vnc.service novnc.service tixcraft-webgui.service
 # 一定要 restart 不能只 enable --now —— 對已經在跑的服務，`--now` 不會重啟，
 # 改寫的 unit 檔就靜靜地不生效（踩過一次：改了 websockify 的綁定位址卻沒套上）。
 # 這支是維護腳本，跑的時候不該有搶票在進行。
-sudo systemctl restart xvfb.service x11vnc.service novnc.service tixcraft-webgui.service
+sudo systemctl restart xvfb.service openbox.service x11vnc.service novnc.service tixcraft-webgui.service
 sleep 3
-systemctl is-active xvfb x11vnc novnc tixcraft-webgui | tr '\n' ' '; echo
+systemctl is-active xvfb openbox x11vnc novnc tixcraft-webgui | tr '\n' ' '; echo
 
 log "完成"
 cat <<EOF

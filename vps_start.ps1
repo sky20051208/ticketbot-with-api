@@ -97,7 +97,7 @@ if (Test-Path $VpsTunnelPidFile) {
     Remove-Item $VpsTunnelPidFile -ErrorAction SilentlyContinue
 }
 
-Say "建立 SSH 通道（webgui $VpsGuiLocalPort / noVNC $VpsVncLocalPort）"
+Say "建立 SSH 通道（webgui $VpsGuiLocalPort / noVNC $VpsVncLocalPort / VNC $VpsVncRawLocalPort）"
 # accept-new：IP 每次都換，不預先接受主機金鑰的話 ssh 會停在互動提示等輸入
 $sshArgs = @(
     "-N",
@@ -106,6 +106,7 @@ $sshArgs = @(
     "-o", "ServerAliveInterval=30",
     "-L", "$($VpsGuiLocalPort):127.0.0.1:$VpsGuiRemotePort",
     "-L", "$($VpsVncLocalPort):127.0.0.1:$VpsVncRemotePort",
+    "-L", "$($VpsVncRawLocalPort):127.0.0.1:$VpsVncRawRemotePort",
     "$VpsUser@$ip"
 )
 $tunnel = Start-Process ssh -ArgumentList $sshArgs -PassThru -WindowStyle Minimized
@@ -126,7 +127,8 @@ Start-Process "http://localhost:$VpsGuiLocalPort"
 
 Write-Host ""
 Write-Host "  美東 War-Room : http://localhost:$VpsGuiLocalPort  （拓元）" -ForegroundColor Green
-Write-Host "  遠端畫面      : http://localhost:$VpsVncLocalPort/vnc.html  （換帳號重登 / 看結帳頁時用）"
-Write-Host "  SSH      : ssh -i $VpsKeyPath $VpsUser@$ip"
+Write-Host "  遠端畫面(快)  : VNC 客戶端連 localhost:$VpsVncRawLocalPort  ← 高延遲下比瀏覽器版順很多"
+Write-Host "  遠端畫面(免裝): http://localhost:$VpsVncLocalPort/vnc.html"
+Write-Host "  SSH           : ssh -i $VpsKeyPath $VpsUser@$ip"
 Write-Host ""
 Write-Host "  用完請執行 .\vps_stop.ps1 關機 —— 忘記關是每月 76 美金 vs 3 美金的差別" -ForegroundColor Yellow

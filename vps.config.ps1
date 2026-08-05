@@ -19,6 +19,12 @@ $VpsGuiRemotePort = 7860
 $VpsVncLocalPort  = 6080   # noVNC，換帳號重登 / 看結帳頁時用
 $VpsVncRemotePort = 6080
 
+# 原生 VNC 埠。台灣↔Ashburn 來回 200ms，瀏覽器裡的 noVNC（JS 畫 canvas）在這種延遲下
+# 特別鈍；用原生客戶端（TigerVNC 之類）接 5900 會順很多。noVNC 留著當「懶得裝軟體時」的
+# 備案，兩條通道都開著不衝突。
+$VpsVncRawLocalPort  = 5900
+$VpsVncRawRemotePort = 5900
+
 # 開機後等 SSH 起來的上限（OCI 冷開機實測約 60~90 秒）
 $VpsBootTimeoutSec = 240
 

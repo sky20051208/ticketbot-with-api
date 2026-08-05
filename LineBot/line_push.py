@@ -156,9 +156,17 @@ def _capture_confirmation_area(driver) -> bytes:
 
     做法：先確保視窗是 normal 狀態、拉回正常桌面寬度（多開 tile 時視窗可能很窄，
     窄版會 reflow 成擠壓/手機版排版，文字會很小；搶到票時視窗也可能是 maximized
-    狀態），再找頭尾兩個文字錨點的頁面座標，把視窗拉高到足以容納整段內容，捲動讓
-    區塊頂端貼齊 viewport 頂部，一次截完不用剪接。抓不到錨點（頁面改版/不同活動
-    版型）就退回捲到頁面最底部，不讓整支流程因此掛掉。"""
+    狀態），再找頭尾兩個文字錨點算出頁面座標，用 CDP 的 `captureBeyondViewport`
+    直接截那塊矩形。
+
+    **為什麼不再把視窗拉高**（2026-08-01 搬美東 VPS 時改的）：舊版是把視窗高度拉到
+    足以容納整塊再截。在有實體螢幕的 Windows 上沒問題，但 VPS 上 Chrome 跑在 Xvfb
+    的虛擬螢幕裡，視窗拉不到螢幕以外 —— 確認頁那塊常常超過螢幕高度，截出來就被裁掉。
+    `captureBeyondViewport` 由 renderer 直接算，跟視窗多大、螢幕多大都無關。
+    （nodriver 那條路徑 `_capture_page_nodriver` 本來就是這樣做的。）
+
+    抓不到錨點（頁面改版/不同活動版型）就退回「捲到最底 + 一般截圖」，不讓整支流程掛掉。
+    """
     try:
         _ensure_normal_window_state(driver)
         driver.set_window_size(_SCREENSHOT_WIDTH, 900)
@@ -166,24 +174,36 @@ def _capture_confirmation_area(driver) -> bytes:
 
         top_el = driver.find_element(By.XPATH, _SCREENSHOT_TOP_XPATH)
         bottom_el = driver.find_element(By.XPATH, _SCREENSHOT_BOTTOM_XPATH)
-        top_y = driver.execute_script(
-            "return arguments[0].getBoundingClientRect().top + window.scrollY;", top_el)
-        bottom_y = driver.execute_script(
-            "return arguments[0].getBoundingClientRect().bottom + window.scrollY;", bottom_el)
-        block_height = int(bottom_y - top_y) + 60  # 留一點上下邊界
-        driver.set_window_size(_SCREENSHOT_WIDTH, max(block_height + 200, 600))
-        driver.execute_script("window.scrollTo(0, arguments[0]);", max(top_y - 30, 0))
-        time.sleep(0.4)  # 等 resize + 捲動後版面穩定
+        rect = driver.execute_script(
+            "const t = arguments[0].getBoundingClientRect();"
+            "const b = arguments[1].getBoundingClientRect();"
+            "return {top: t.top + window.scrollY, bottom: b.bottom + window.scrollY,"
+            " width: document.documentElement.clientWidth};",
+            top_el, bottom_el)
+
+        top = max(rect["top"] - 30, 0)
+        clip = {
+            "x": 0,
+            "y": top,
+            "width": rect["width"],
+            "height": rect["bottom"] - top + 30,
+            "scale": 1,
+        }
+        data = driver.execute_cdp_cmd("Page.captureScreenshot", {
+            "format": "png", "captureBeyondViewport": True, "clip": clip,
+        })
+        return base64.b64decode(data["data"])
     except Exception as e:
         print(f"[LINE] 定位確認區塊失敗（改用捲到頁面最底部）: {type(e).__name__}: {e}")
-        try:
-            _ensure_normal_window_state(driver)
-            driver.set_window_size(_SCREENSHOT_WIDTH, 900)
-            time.sleep(0.3)
-        except Exception:
-            pass
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(0.4)
+
+    try:
+        _ensure_normal_window_state(driver)
+        driver.set_window_size(_SCREENSHOT_WIDTH, 900)
+        time.sleep(0.3)
+    except Exception:
+        pass
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(0.4)
     return driver.get_screenshot_as_png()
 
 
