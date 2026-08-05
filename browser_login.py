@@ -68,10 +68,18 @@ def apply_platform_options(opts: Options) -> None:
     會直接 exit（Selenium 那端只看得到 "Chrome instance exited"）。VPS 是單用途機器，
     關掉沙箱沒有實質風險。`/dev/shm` 在雲端 VM 通常只有 64MB，不改的話 Chrome 開幾個
     分頁就崩。
+
+    平滑捲動要關掉是為了遠端桌面：VPS 的畫面是靠 VNC 一張一張傳回台灣，而平滑捲動
+    會把一次滾輪變成十幾張中間影格，每一張都要重繪整個視窗再壓縮送出去。實測
+    （1440x900 / Tight+JPEG）一次滾輪從 352KB 掉到 131KB，等於幀率 2.7 倍。
+    這個旗標只改瀏覽器內部行為，網站用 JS / CSS 都偵測不到 —— 不像
+    --force-prefers-reduced-motion 會被 media query 讀到而多一個指紋差異，
+    在 eps 面前不值得冒那個險。
     """
     if sys.platform.startswith("linux"):
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-smooth-scrolling")
 
 
 def setup_proxy_bridge(proxy_url: str) -> int | None:
