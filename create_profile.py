@@ -34,9 +34,27 @@ Google 會擋 Selenium 控制的瀏覽器登入（"這個瀏覽器或應用程�
 
 之後 GUI 下拉選單（切到對應平台時）就會看到這個帳號名，bot 用它開 Chrome 即為已登入狀態。
 GUI 是在載入 / INIT 時掃 chrome_profiles/ 的，新建完要重整網頁才會出現。
+
+在美東 VPS 上建 profile
+-----------------------
+**一定要在 VPS 上建，不能在本機建好再複製過去** —— 拓元的 `eps_sid` 綁發放時的出口 IP，
+本機登入拿到的 cookie 到了 VPS 就作廢。
+
+Chrome 會開在 VPS 的虛擬螢幕 :99 上，所以要先連上遠端桌面才看得到、才能點：
+
+    1. 面板按「開機並打開 War-Room」，再按「遠端桌面」（Moonlight）
+    2. 在遠端桌面裡右鍵 → 開一個終端機（xfce4-terminal），或從本機 ssh 進去
+    3. cd ~/ticketbot && DISPLAY=:99 ~/venv/bin/python create_profile.py --name 帳號名
+       （從 ssh 跑就一定要帶 DISPLAY=:99，不然 Chrome 找不到螢幕會直接 exit）
+    4. Chrome 會出現在遠端桌面上 → 在那邊完成登入 → 關掉視窗 → 回終端機按 Enter
+    5. 重整 War-Room 網頁，卡片的 chrome_profile 下拉就會出現這個名字
+
+VPS 的 config.ENABLE_PROXY_POOL 是 False，所以不會走 CliProxy —— 這是對的：
+登入用的出口 IP 就是搶票用的出口 IP，兩邊同源 eps_sid 才不會失效。
 """
 import os
 import re
+import sys
 import random
 import string
 import hashlib
@@ -46,7 +64,7 @@ import subprocess
 import requests
 
 import config
-from browser_login import setup_proxy_bridge
+from browser_login import setup_proxy_bridge, platform_chrome_flags
 
 PROFILES_DIR = os.path.join(config.BASE_DIR, "chrome_profiles")
 
@@ -68,11 +86,14 @@ PLATFORM_HOME = {
     "ticketplus": "https://ticketplus.com.tw/",
 }
 
-# Windows 上 Chrome 常見安裝位置
+# Chrome 常見安裝位置。美東 VPS 也要能建 profile —— 那台的登入態必須在那台上取得，
+# 因為 eps_sid 綁發放時的出口 IP，拿本機登入的 cookie 上去用會直接作廢。
 CHROME_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
 ]
 
 
@@ -81,7 +102,7 @@ def find_chrome() -> str:
         if os.path.isfile(p):
             return p
     raise FileNotFoundError(
-        "找不到 chrome.exe — 請把你的 Chrome 路徑加到 create_profile.py 的 CHROME_CANDIDATES"
+        "找不到 Chrome — 請把你的 Chrome 路徑加到 create_profile.py 的 CHROME_CANDIDATES"
     )
 
 
@@ -163,6 +184,9 @@ def main():
         "--lang=zh-TW",  # 語系跟 proxy 的台灣 IP 一致，避免 timezone/locale 跟地理位置對不上
         "--disable-blink-features=AutomationControlled",  # 保險旗標；一般 Chrome 本來就沒有這個標記
     ]
+    # Linux（VPS）需要 --no-sandbox 之類的旗標，不加的話 Chrome 直接 exit。
+    # 跟搶票時開的 Chrome 共用同一份定義，避免兩邊歪掉。
+    cmd += platform_chrome_flags()
     # --proxy 明確指定優先；否則 ENABLE_PROXY_POOL=True 自動從 config 建
     if args.proxy:
         proxy_url = args.proxy
@@ -211,8 +235,16 @@ def main():
     # 確保 Chrome 真的關了 — profile 資料夾不能被鎖著，bot 才能用
     if proc.poll() is None:
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=5)
+            if sys.platform == "win32":
+                # Windows 要 /T 連子進程一起收；Chrome 的分頁是獨立 process
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=5)
+            else:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
         except Exception:
             pass
 

@@ -61,25 +61,33 @@ def apply_stealth_to_options(opts: Options) -> None:
     opts.add_argument("--disable-blink-features=AutomationControlled")
 
 
-def apply_platform_options(opts: Options) -> None:
-    """Linux（美東 VPS）專用的 Chrome 啟動參數；Windows 完全不受影響。
+def platform_chrome_flags() -> list[str]:
+    """Linux（美東 VPS）專用的 Chrome 啟動旗標；Windows 回空 list、完全不受影響。
 
     Ubuntu 24.04 的 AppArmor 預設擋 unprivileged user namespace，Chrome 的沙箱起不來
     會直接 exit（Selenium 那端只看得到 "Chrome instance exited"）。VPS 是單用途機器，
     關掉沙箱沒有實質風險。`/dev/shm` 在雲端 VM 通常只有 64MB，不改的話 Chrome 開幾個
     分頁就崩。
 
-    平滑捲動要關掉是為了遠端桌面：VPS 的畫面是靠 VNC 一張一張傳回台灣，而平滑捲動
-    會把一次滾輪變成十幾張中間影格，每一張都要重繪整個視窗再壓縮送出去。實測
-    （1440x900 / Tight+JPEG）一次滾輪從 352KB 掉到 131KB，等於幀率 2.7 倍。
-    這個旗標只改瀏覽器內部行為，網站用 JS / CSS 都偵測不到 —— 不像
-    --force-prefers-reduced-motion 會被 media query 讀到而多一個指紋差異，
-    在 eps 面前不值得冒那個險。
+    平滑捲動要關掉是為了遠端桌面：VPS 的畫面要一路傳回台灣，而平滑捲動會把一次滾輪
+    變成十幾張中間影格，每一張都是整個視窗重繪。實測（1440x900 / VNC Tight+JPEG）
+    一次滾輪從 352KB 掉到 131KB，等於幀率 2.7 倍。這個旗標只改瀏覽器內部行為，
+    網站用 JS / CSS 都偵測不到 —— 不像 --force-prefers-reduced-motion 會被 media
+    query 讀到而多一個指紋差異，在 eps 面前不值得冒那個險。
+
+    回傳 list 而不是直接塞進 Options，是因為 create_profile.py 走 subprocess 直接開
+    一般 Chrome（不經 Selenium，否則 Google 登入會被擋），需要的是命令列參數。
+    兩條路徑共用這裡，才不會出現「搶票時有 --no-sandbox、建 profile 時沒有」這種歪掉。
     """
-    if sys.platform.startswith("linux"):
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-smooth-scrolling")
+    if not sys.platform.startswith("linux"):
+        return []
+    return ["--no-sandbox", "--disable-dev-shm-usage", "--disable-smooth-scrolling"]
+
+
+def apply_platform_options(opts: Options) -> None:
+    """把 platform_chrome_flags() 套到 Selenium 的 Options 上。"""
+    for flag in platform_chrome_flags():
+        opts.add_argument(flag)
 
 
 def setup_proxy_bridge(proxy_url: str) -> int | None:
