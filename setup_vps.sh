@@ -21,7 +21,8 @@ log "系統套件"
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     python3-pip python3-venv python3-dev build-essential \
-    xvfb chrony git curl unzip netcat-openbsd
+    xvfb xserver-xorg-video-dummy x11-xserver-utils \
+    chrony git curl unzip netcat-openbsd
 
 log "swap ${SWAP_GB}G（寫進 fstab，重開機不會消失）"
 # 上一台機器就是栽在這：fallocate 建的 swap 沒進 fstab，重開機後 Chrome 直接 OOM
@@ -106,12 +107,23 @@ else
 fi
 
 log "常駐服務（開機自動起，本機腳本只要開機 + 開通道）"
-# 為什麼要 Xvfb：webgui spawn 的 Chrome 是 headful 的，沒有 X display 會直接 exit
+# 為什麼要虛擬螢幕：webgui spawn 的 Chrome 是 headful 的，沒有 X display 會直接 exit
 # （Selenium 那端只看得到 "Chrome instance exited"）。VPS 沒有實體螢幕，用虛擬的。
+#
+# 主力是 Xorg + dummy driver，不是 Xvfb。理由有兩個，Xvfb 都做不到：
+#   1. **RandR** —— 可以用 xrandr 隨時換解析度而不用重啟整個 display。VNC 每幀成本正比
+#      於像素數，想換到低解析度換幀率時這是唯一乾淨的做法（x11vnc 的 -scale 不能用：
+#      官方 README 寫明偵測到縮放會自動退回 ZRLE 無損編碼，等於把 JPEG 關掉，只會更慢）
+#   2. **udev** —— Xvfb 不支援 udev 熱插拔，Sunshine 用 uinput 造出來的虛擬鍵鼠
+#      X server 根本看不到，串流進去會變成「畫面會動但完全不能操作」
+#
+# xvfb.service 的 unit 檔仍然留著但不啟用，純粹當回退用：
+#   sudo systemctl disable --now xorg-dummy && sudo systemctl enable --now xvfb
 sudo tee /etc/systemd/system/xvfb.service > /dev/null <<EOF
 [Unit]
-Description=Xvfb virtual display :99 (1440x900)
+Description=Xvfb virtual display :99 (1440x900) -- 備援，平常不啟用
 After=network.target
+Conflicts=xorg-dummy.service
 
 [Service]
 User=$USER
@@ -123,11 +135,80 @@ TimeoutStopSec=10
 WantedBy=multi-user.target
 EOF
 
+# Virtual 給到 1920x1200，是 RandR 能配置的上限（framebuffer 一開始就要留夠大，之後
+# xrandr 只能在這個範圍內加模式）。實際起始模式仍是 1440x900 —— 跟 Xvfb 時期一模一樣，
+# 這樣 Chrome 的版面、視窗大小、LINE 成交截圖的寬度通通不受影響。
+sudo tee /etc/X11/xorg-dummy.conf > /dev/null <<'EOF'
+Section "Device"
+    Identifier  "dummy"
+    Driver      "dummy"
+    VideoRam    256000
+EndSection
+
+Section "Monitor"
+    Identifier  "dummy-monitor"
+    HorizSync   5.0 - 1000.0
+    VertRefresh 5.0 - 200.0
+    Modeline "1440x900"  106.50 1440 1528 1672 1904  900 903 909 934 -hsync +vsync
+    Modeline "1280x800"   83.50 1280 1352 1480 1680  800 803 809 831 -hsync +vsync
+    Modeline "1152x720"   66.75 1152 1208 1328 1504  720 723 729 748 -hsync +vsync
+    Modeline "1024x640"   52.00 1024 1072 1176 1328  640 643 649 666 -hsync +vsync
+EndSection
+
+Section "Screen"
+    Identifier  "dummy-screen"
+    Device      "dummy"
+    Monitor     "dummy-monitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth     24
+        Modes     "1440x900" "1280x800" "1152x720" "1024x640"
+        Virtual   1920 1200
+    EndSubSection
+EndSection
+
+Section "ServerLayout"
+    Identifier  "dummy-layout"
+    Screen      "dummy-screen"
+EndSection
+EOF
+
+# Xorg 預設只讓「實體 console 上的登入者」啟動。這台是無頭機、由 systemd 拉起來，
+# 不放寬的話會噴 "only console users are allowed to run the X server"。
+sudo tee /etc/X11/Xwrapper.config > /dev/null <<'EOF'
+allowed_users=anybody
+needs_root_rights=yes
+EOF
+
+sudo tee /etc/systemd/system/xorg-dummy.service > /dev/null <<EOF
+[Unit]
+Description=Xorg dummy virtual display :99 (1440x900, RandR capable)
+After=network.target systemd-udevd.service
+Conflicts=xvfb.service
+
+[Service]
+User=$USER
+ExecStart=/usr/bin/Xorg :99 -config /etc/X11/xorg-dummy.conf -nolisten tcp -novtswitch
+Restart=always
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Sunshine 靠 /dev/uinput 造虛擬鍵鼠。預設權限是 root only，且 ubuntu 不在 input 群組。
+# 兩者都補上 Sunshine 才注入得了鍵盤滑鼠（改群組要重登入才生效，所以順便直接 chmod）。
+sudo tee /etc/udev/rules.d/60-sunshine.rules > /dev/null <<'EOF'
+KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
+EOF
+sudo usermod -aG input "$USER"
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=misc || true
+
 sudo tee /etc/systemd/system/tixcraft-webgui.service > /dev/null <<EOF
 [Unit]
 Description=Tixcraft War-Room webgui
-After=xvfb.service oci-secondary-ips.service
-Requires=xvfb.service
+After=xorg-dummy.service oci-secondary-ips.service
+Requires=xorg-dummy.service
 
 [Service]
 User=$USER
@@ -154,8 +235,8 @@ sudo apt-get install -y -qq x11vnc novnc websockify openbox tint2
 sudo tee /etc/systemd/system/openbox.service > /dev/null <<EOF
 [Unit]
 Description=Openbox window manager on :99
-After=xvfb.service
-Requires=xvfb.service
+After=xorg-dummy.service
+Requires=xorg-dummy.service
 
 [Service]
 User=$USER
@@ -244,8 +325,8 @@ EOF
 sudo tee /etc/systemd/system/x11vnc.service > /dev/null <<EOF
 [Unit]
 Description=x11vnc for display :99
-After=xvfb.service
-Requires=xvfb.service
+After=xorg-dummy.service
+Requires=xorg-dummy.service
 
 [Service]
 User=$USER
@@ -277,13 +358,20 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable xvfb.service openbox.service tint2.service x11vnc.service novnc.service tixcraft-webgui.service
+# xvfb 只留 unit 檔當回退，不進開機清單 —— 它跟 xorg-dummy 互為 Conflicts，兩個都
+# enable 的話開機會互相把對方踢掉。
+sudo systemctl disable xvfb.service 2>/dev/null || true
+sudo systemctl stop xvfb.service 2>/dev/null || true
+sudo systemctl enable xorg-dummy.service openbox.service tint2.service x11vnc.service novnc.service tixcraft-webgui.service
 # 一定要 restart 不能只 enable --now —— 對已經在跑的服務，`--now` 不會重啟，
 # 改寫的 unit 檔就靜靜地不生效（踩過一次：改了 websockify 的綁定位址卻沒套上）。
 # 這支是維護腳本，跑的時候不該有搶票在進行。
-sudo systemctl restart xvfb.service openbox.service tint2.service x11vnc.service novnc.service tixcraft-webgui.service
+sudo systemctl restart xorg-dummy.service
+sleep 2
+sudo systemctl restart openbox.service tint2.service x11vnc.service novnc.service tixcraft-webgui.service
 sleep 3
-systemctl is-active xvfb openbox tint2 x11vnc novnc tixcraft-webgui | tr '\n' ' '; echo
+systemctl is-active xorg-dummy openbox tint2 x11vnc novnc tixcraft-webgui | tr '\n' ' '; echo
+DISPLAY=:99 xrandr 2>/dev/null | head -3 || echo "  !! xrandr 讀不到 :99"
 
 log "完成"
 cat <<EOF
@@ -297,7 +385,6 @@ cat <<EOF
          $VENV/bin/python $REPO_DIR/bench_eps.py
          $VENV/bin/python $REPO_DIR/bench_vps.py
     3. 開 Chrome 測登入（無桌面，用 CDP 通道從本機操作）：
-         Xvfb :99 -screen 0 1440x900x24 &
          DISPLAY=:99 google-chrome --no-sandbox --disable-dev-shm-usage \\
            --remote-debugging-port=9222 --user-data-dir=\$HOME/chrome-tixcraft \\
            --window-size=1440,900 https://tixcraft.com &
