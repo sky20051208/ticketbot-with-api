@@ -23,7 +23,7 @@ function Get-VpsState {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "拓元美東虛擬機"
-$form.Size = New-Object System.Drawing.Size(360, 260)
+$form.Size = New-Object System.Drawing.Size(360, 318)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -73,6 +73,12 @@ $btnStop = New-Button "■  關機" ([System.Drawing.Color]::FromArgb(200, 55, 5
 $btnStop.Add_Click({ Start-Bat "vps_stop.bat" })
 $form.Controls.Add($btnStop)
 
+# 遠端桌面走原生 VNC 客戶端而不是瀏覽器裡的 noVNC —— 台灣↔Ashburn 來回 200ms，
+# noVNC 用 JS 重畫 canvas 在這種延遲下特別鈍。通道沒開時 bat 會自己擋下來。
+$btnVnc = New-Button "▣  遠端桌面" ([System.Drawing.Color]::FromArgb(58, 110, 175)) 191
+$btnVnc.Add_Click({ Start-Bat "vps_vnc.bat" })
+$form.Controls.Add($btnVnc)
+
 $btnRefresh = New-Object System.Windows.Forms.Button
 $btnRefresh.Text = "重新整理狀態"
 $btnRefresh.Font = New-Object System.Drawing.Font("Segoe UI", 9)
@@ -80,7 +86,7 @@ $btnRefresh.ForeColor = [System.Drawing.Color]::White
 $btnRefresh.BackColor = [System.Drawing.Color]::FromArgb(60, 68, 82)
 $btnRefresh.FlatStyle = "Flat"
 $btnRefresh.FlatAppearance.BorderSize = 0
-$btnRefresh.Location = New-Object System.Drawing.Point(20, 190)
+$btnRefresh.Location = New-Object System.Drawing.Point(20, 248)
 $btnRefresh.Size = New-Object System.Drawing.Size(305, 26)
 $form.Controls.Add($btnRefresh)
 
