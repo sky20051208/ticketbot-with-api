@@ -61,8 +61,18 @@ def apply_stealth_to_options(opts: Options) -> None:
     opts.add_argument("--disable-blink-features=AutomationControlled")
 
 
-def platform_chrome_flags() -> list[str]:
-    """Linux（美東 VPS）專用的 Chrome 啟動旗標；Windows 回空 list、完全不受影響。
+# 拓元是**看 Accept-Language 決定回中文版還是英文版**的。VPS 的系統語系是 C.UTF-8，
+# Chrome 就送 en-US，整個站變英文 —— 客人收到的成交截圖是英文的，而且 line_push 的
+# 中文文字錨點（「購票會員聯絡資訊」）永遠比對不到，截圖只能退回捲到最底的粗略版。
+# 2026-08-06 實際在正式搶票時掛掉才發現。
+#
+# **`--lang=zh-TW` 沒有用** —— 它只改瀏覽器自己的 UI 語言，`navigator.languages`
+# 仍然是 en-US（實測 A/B 過）。要改的是 `--accept-lang`。
+ACCEPT_LANG_FLAG = "--accept-lang=zh-TW,zh,en-US,en"
+
+
+def chrome_launch_flags() -> list[str]:
+    """所有 Chrome 啟動點共用的旗標：語系（各平台都要）+ Linux 專用的那幾個。
 
     Ubuntu 24.04 的 AppArmor 預設擋 unprivileged user namespace，Chrome 的沙箱起不來
     會直接 exit（Selenium 那端只看得到 "Chrome instance exited"）。VPS 是單用途機器，
@@ -77,16 +87,17 @@ def platform_chrome_flags() -> list[str]:
 
     回傳 list 而不是直接塞進 Options，是因為 create_profile.py 走 subprocess 直接開
     一般 Chrome（不經 Selenium，否則 Google 登入會被擋），需要的是命令列參數。
-    兩條路徑共用這裡，才不會出現「搶票時有 --no-sandbox、建 profile 時沒有」這種歪掉。
+    所有路徑共用這裡，才不會出現「搶票時有 --no-sandbox、建 profile 時沒有」這種歪掉。
     """
-    if not sys.platform.startswith("linux"):
-        return []
-    return ["--no-sandbox", "--disable-dev-shm-usage", "--disable-smooth-scrolling"]
+    flags = [ACCEPT_LANG_FLAG]
+    if sys.platform.startswith("linux"):
+        flags += ["--no-sandbox", "--disable-dev-shm-usage", "--disable-smooth-scrolling"]
+    return flags
 
 
 def apply_platform_options(opts: Options) -> None:
-    """把 platform_chrome_flags() 套到 Selenium 的 Options 上。"""
-    for flag in platform_chrome_flags():
+    """把 chrome_launch_flags() 套到 Selenium 的 Options 上。"""
+    for flag in chrome_launch_flags():
         opts.add_argument(flag)
 
 

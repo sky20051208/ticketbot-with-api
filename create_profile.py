@@ -64,7 +64,7 @@ import subprocess
 import requests
 
 import config
-from browser_login import setup_proxy_bridge, platform_chrome_flags
+from browser_login import setup_proxy_bridge, chrome_launch_flags
 
 PROFILES_DIR = os.path.join(config.BASE_DIR, "chrome_profiles")
 
@@ -181,12 +181,12 @@ def main():
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
-        "--lang=zh-TW",  # 語系跟 proxy 的台灣 IP 一致，避免 timezone/locale 跟地理位置對不上
+        "--lang=zh-TW",  # 瀏覽器自己的 UI 語言（**不影響 Accept-Language**，那個在下面）
         "--disable-blink-features=AutomationControlled",  # 保險旗標；一般 Chrome 本來就沒有這個標記
     ]
-    # Linux（VPS）需要 --no-sandbox 之類的旗標，不加的話 Chrome 直接 exit。
-    # 跟搶票時開的 Chrome 共用同一份定義，避免兩邊歪掉。
-    cmd += platform_chrome_flags()
+    # 語系（Accept-Language）+ Linux 的 --no-sandbox 等等。跟搶票時開的 Chrome 共用
+    # 同一份定義，避免建 profile 跟實際搶票拿到不同語言版本的網站。
+    cmd += chrome_launch_flags()
     # --proxy 明確指定優先；否則 ENABLE_PROXY_POOL=True 自動從 config 建
     if args.proxy:
         proxy_url = args.proxy
