@@ -36,6 +36,14 @@ if ! grep -q '^/swapfile' /etc/fstab; then
 fi
 free -h | grep -i swap
 
+log "關掉 lightdm —— 它會攔截電源鍵，讓 SOFTSTOP 永遠關不掉機器"
+# 裝 xfce4 時 lightdm 被當相依套件拉進來，它的 unity-greeter 會拿一個 block 模式的
+# `handle-power-key` inhibitor。logind 收到 ACPI 電源鍵後交給 greeter 處理，而那是
+# 無頭機上永遠沒人看的登入畫面 —— 訊號直接被吃掉，OCI 只能等滿 15 分鐘強制斷電。
+# 實測：SOFTSTOP 花了 12 分鐘，上次開機的 journal 裡連一行關機紀錄都沒有。
+# 這台的畫面走 Xvfb :99，不需要顯示管理器。
+sudo systemctl disable --now lightdm 2>/dev/null || true
+
 log "校時（chrony）—— T-0 高頻偵測的前提"
 sudo systemctl enable --now chrony
 chronyc tracking | head -3 || true
