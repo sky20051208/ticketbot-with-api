@@ -188,7 +188,10 @@ Conflicts=xvfb.service
 
 [Service]
 User=$USER
-ExecStart=/usr/bin/Xorg :99 -config /etc/X11/xorg-dummy.conf -nolisten tcp -novtswitch
+# -config 一定要給**相對**檔名。Xorg 透過 setuid wrapper 提權執行時會擋掉絕對路徑
+# （"With elevated privileges -config must specify a relative path"），它自己會去
+# /etc/X11/ 底下找。
+ExecStart=/usr/bin/Xorg :99 -config xorg-dummy.conf -nolisten tcp -novtswitch
 Restart=always
 TimeoutStopSec=10
 
