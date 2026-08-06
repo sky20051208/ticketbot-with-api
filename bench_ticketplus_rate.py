@@ -193,11 +193,14 @@ def main():
         jobs.put(None)
 
     print("\n" + "=" * 78)
-    if hit is None:
+    if not args.bust:
+        print("提醒：沒開 --bust，上面多半是 CloudFront 快取命中，**量到的不是後端上限**。")
+        print("      要決定輪詢速率請加 --bust 重跑。")
+    elif hit is None:
         top = args.rates[-1]
-        print(f"結論：測到 {top} req/s 都沒被擋。")
-        print(f"      偵測迴圈的 RETRY_INTERVAL 可以放心降到 {1/top:.2f}s 附近，")
-        print(f"      但仍建議留餘裕（真正搶票時是多開同時打，總速率會是這個的 N 倍）。")
+        print(f"結論：繞過快取、{top} req/s 全打到 origin 都沒被擋。")
+        print(f"      單一 instance 的 RETRY_INTERVAL 降到 {1/top:.2f}s 是安全的，")
+        print(f"      但多開時總速率是 N 倍 —— N 個 instance 就把間隔乘 N 回去。")
     else:
         safe = max([r for r in args.rates if r < hit], default=0)
         print(f"結論：{hit} req/s 開始被擋（HTTP 403/429 或 errCode 110）。")
