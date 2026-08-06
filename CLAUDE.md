@@ -87,7 +87,7 @@ DevTools → Application → Cookies → `user`。`extract_token()` 吃整串 co
 - 「售完」判斷要看旗標：`productLimit` / `ticketAreaLimit` 為 false 時 `count=0` **不代表售完**（不限量）
 - `finalizedSeats=True` = 系統配位（前端 `seatReserve` 預設值），拿到 orderId 座位就定了直接進結帳；設 False 會多一頁自己點位子，搶票沒意義
 - token 失效官方回 **HTTP 200 + errCode 103**，不是 401 —— 這種錯要標 `fatal` 直接中止，不然 poll 迴圈會對每個票區空打（見 `reserve.AUTH_ERR_CODES`）
-- **access_token 只有 60 分鐘壽命**（JWT `exp`-`iat`）。手貼 COOKIE 模式要臨開賣前才貼，不然等倒數的時候就過期了；長時間掛機一律用 `COOKIE_SOURCE="userdata"`
+- **access_token 只有 60 分鐘壽命**（JWT `exp`-`iat`）。手貼 COOKIE 模式要臨開賣前才貼，不然等倒數的時候就過期了；長時間掛機一律用 `COOKIE_SOURCE="userdata"`。**但 userdata 模式不等於自動安全**：profile 裡的 `user` cookie 上次登入留下來就一直在，2026-08-06 正式搶票就是這樣掛的 —— 「登入」只花 1 毫秒（直接讀到舊 cookie），一路跑到 T-0 才被 errCode 103 打回。現在 `session.token_remaining()` 會解 JWT 的 `exp`，`open_and_login()` 拒收剩餘壽命 < 120s 的 token，開搶前也會再檢查一次（快過期才回瀏覽器重讀，健康就完全不動）。**使用者端要注意：token 過期時畫面通常還顯示已登入（前端不會自己驗 exp），必須先登出再登入**
 - enqueue 常見 **errCode 137 + waitSecond** = 排隊中、叫你等 N 秒（實測 10s），照做就好，硬打不會比較快。2026-07-29 實測全鏈路：enqueue 105ms → 等 10s → enqueue 83ms 拿 uuid → reserve 2138ms 拿 orderId（reserve 慢是伺服器端在配位寫訂單，壓不下來）
 - **TicketPlus 一律回 HTTP 200，成敗全看 errCode**，不要看 status code。完整對照表在
   `reserve.ERR_MESSAGES`（官方沒文件，是拿前端 `errorHandler` 的分支 × `/assets/lang/tw.json`
