@@ -8,14 +8,17 @@ TicketPlus 沒有 /login 路由（登入是全站共用的 dialog），所以直
 右上角登入；判斷登入完成的依據是 `user` cookie 出現，比 DOM 特徵可靠。
 """
 import asyncio
+import json
 import time
+from urllib.parse import quote, unquote
 
 import nodriver as uc
 
 import browser_login as _tx   # 只借用 setup_proxy_bridge（跟站台無關）
 import config
 from ticketplus_api import BASE
-from ticketplus_api.session import describe_token, extract_token, token_remaining
+from ticketplus_api.session import (build_session, describe_token, extract_refresh_token,
+                                    extract_token, refresh_access_token, token_remaining)
 
 READ_USER_COOKIE = "document.cookie.split('; ').find(c=>c.startsWith('user='))||''"
 
@@ -63,14 +66,72 @@ def _browser_args(proxy_url):
     return args
 
 
-async def read_token(tab) -> str:
-    """從頁面的 `user` cookie 掏 access_token，沒登入回空字串。"""
+async def read_user_cookie(tab) -> str:
+    """讀原始的 `user=` cookie 字串（access_token 和 refresh_token 都在裡面）。"""
     try:
         raw = await tab.evaluate(READ_USER_COOKIE, return_by_value=True)
     except Exception:
         return ""
     # nodriver: falsy 值可能回原始 RemoteObject，所以先確定是 str 再用
-    return extract_token(raw) if isinstance(raw, str) else ""
+    return raw if isinstance(raw, str) else ""
+
+
+async def read_token(tab) -> str:
+    """從頁面的 `user` cookie 掏 access_token，沒登入回空字串。"""
+    return extract_token(await read_user_cookie(tab))
+
+
+async def write_user_cookie(tab, access_token: str, refresh_token: str) -> bool:
+    """把換發到的新 token 寫回瀏覽器的 `user` cookie。
+
+    **為什麼一定要寫回**：refresh_token 是輪替的（官方前端的 REFRESH_TOKEN mutation 會把
+    它一起換掉）。我們在外面換一次，瀏覽器手上那顆就作廢了 —— 搶到票跳結帳頁時 SPA 會
+    拿舊的去續命、失敗、直接登出，客人就付不了款。
+
+    走 CDP 而不是 `document.cookie`：JS 讀不到 cookie 的 domain / path / expires，自己
+    寫一顆很容易變成「同名但 domain 不同」的第二顆蓋在上面。CDP 可以先把原本那顆完整
+    讀出來，照原樣的屬性寫回去。
+    """
+    from nodriver import cdp
+    try:
+        cookies = await tab.send(cdp.network.get_cookies([BASE]))
+        target = next((c for c in cookies if c.name == "user"), None)
+        if target is None:
+            print("[TOKEN] 瀏覽器裡找不到 user cookie，跳過寫回")
+            return False
+        data = json.loads(unquote(target.value))
+        data["access_token"] = access_token
+        if refresh_token:
+            data["refresh_token"] = refresh_token
+        await tab.send(cdp.network.set_cookie(
+            name="user",
+            value=quote(json.dumps(data, separators=(",", ":")), safe=""),
+            domain=target.domain, path=target.path,
+            secure=target.secure, http_only=target.http_only,
+        ))
+        return True
+    except Exception as e:
+        print(f"[TOKEN] 寫回瀏覽器 cookie 失敗（不影響送單，但結帳頁可能要重新登入）: "
+              f"{type(e).__name__}: {e}")
+        return False
+
+
+async def refresh_via_cookie(tab, raw_cookie: str) -> str:
+    """用 cookie 裡的 refresh_token 換一張新的 access_token，並寫回瀏覽器。
+
+    回新的 access_token；沒有 refresh_token 或連它也過期了就回空字串（那才真的要重登）。
+    """
+    refresh_token = extract_refresh_token(raw_cookie)
+    if not refresh_token:
+        return ""
+    print("[TOKEN] access_token 已過期，改用 refresh_token 自動換發…")
+    access, new_refresh = refresh_access_token(build_session(), refresh_token)
+    if not access:
+        return ""
+    print(f"[TOKEN] 換發成功（{describe_token(access)}）")
+    if tab is not None:
+        await write_user_cookie(tab, access, new_refresh or refresh_token)
+    return access
 
 
 async def open_and_login(user_data_dir: str, event_id: str,
@@ -84,8 +145,10 @@ async def open_and_login(user_data_dir: str, event_id: str,
 
     deadline = time.monotonic() + timeout
     warned_stale = False
+    tried_refresh = False
     while time.monotonic() < deadline:
-        token = await read_token(tab)
+        raw = await read_user_cookie(tab)
+        token = extract_token(raw)
         if token:
             remaining = token_remaining(token)
             # 解不開（remaining is None）就照收 —— 可能是官方換了 token 格式，
@@ -94,6 +157,13 @@ async def open_and_login(user_data_dir: str, event_id: str,
                 print(f"[LOGIN] 登入完成，已取得 access_token"
                       f"（{len(token)} 字，{describe_token(token)}）")
                 return browser, tab, token
+            # 過期了先別急著叫人重登 —— cookie 裡通常還有一顆 refresh_token，
+            # 官方前端自己就是拿它自動續命的。換得到就完全不用麻煩使用者。
+            if not tried_refresh:
+                tried_refresh = True
+                fresh = await refresh_via_cookie(tab, raw)
+                if fresh:
+                    return browser, tab, fresh
             if not warned_stale:
                 warned_stale = True
                 # 這裡最容易誤會：畫面上通常還顯示登入中的狀態（前端不會自己去驗 exp），

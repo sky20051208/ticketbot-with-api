@@ -94,7 +94,11 @@ async def _resolve_token(event_id: str):
 
     token = extract_token(config.COOKIE)
     if token:
-        print(f"[TOKEN] 已從 COOKIE 取得 access_token（{len(token)} 字）")
+        remaining = token_remaining(token)
+        if remaining is not None and remaining < tp_browser.MIN_TOKEN_LIFE:
+            # 貼的 cookie 裡通常連 refresh_token 一起貼進來了，先自動換一張再說
+            token = await tp_browser.refresh_via_cookie(None, config.COOKIE) or token
+        print(f"[TOKEN] 已從 COOKIE 取得 access_token（{len(token)} 字，{describe_token(token)}）")
     else:
         print("[TOKEN] COOKIE 裡找不到 access_token —— "
               "請在 DevTools → Application → Cookies → ticketplus.com.tw 複製 `user` 這個 cookie")
@@ -238,18 +242,21 @@ async def _refresh_token_if_stale(token: str, tab) -> str:
     if remaining is None or remaining >= tp_browser.MIN_TOKEN_LIFE:
         return token
 
-    if tab is None:
-        # 手貼 COOKIE 模式沒有瀏覽器可以重讀，只能提醒
-        print(f"[TOKEN] ⚠ token {describe_token(token)} —— 送單很可能被 errCode 103 打回，"
-              f"請重貼一份新的 COOKIE")
-        return token
+    print(f"[TOKEN] token {describe_token(token)}，開搶前先換一張")
+    # 有瀏覽器就用瀏覽器裡的 cookie（使用者可能中途自己重登過，那顆最新）；
+    # 手貼模式就用 config.COOKIE 裡一起貼進來的 refresh_token。
+    raw = await tp_browser.read_user_cookie(tab) if tab is not None else config.COOKIE
+    fresh_in_browser = extract_token(raw)
+    if fresh_in_browser and (token_remaining(fresh_in_browser) or 0) >= tp_browser.MIN_TOKEN_LIFE:
+        print(f"[TOKEN] 瀏覽器裡已經是新的了（{describe_token(fresh_in_browser)}）")
+        return fresh_in_browser
 
-    print(f"[TOKEN] token {describe_token(token)}，回瀏覽器重讀一次")
-    fresh = await tp_browser.read_token(tab)
-    if fresh and fresh != token and (token_remaining(fresh) or 0) > (remaining or 0):
-        print(f"[TOKEN] 已換上新的 access_token（{describe_token(fresh)}）")
+    fresh = await tp_browser.refresh_via_cookie(tab, raw)
+    if fresh:
         return fresh
-    print(f"[TOKEN] ⚠ 瀏覽器裡也是同一顆過期 token —— 請先登出再登入，否則送單會被打回")
+
+    print(f"[TOKEN] ⚠ 換發失敗，手上還是過期的 token —— 送單很可能被 errCode 103 打回。"
+          f"{'請在瀏覽器先登出再登入' if tab is not None else '請重貼一份新的 COOKIE'}")
     return token
 
 

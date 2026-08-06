@@ -17,25 +17,21 @@ from curl_cffi import requests as cf_requests
 
 import config
 import proxy_pool
-from ticketplus_api import BASE, CONFIG_API
+from ticketplus_api import BASE, CONFIG_API, USER_API
 
 _IMPERSONATE = "chrome142"
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
 
 
-def extract_token(cookie_str: str) -> str:
-    """從各種貼法裡挖出 access_token，挖不到回空字串。吃得下：
+def parse_user_cookie(cookie_str: str) -> dict:
+    """把 `user` cookie 解成 dict，解不出來回空 dict。吃得下：
       - 整串 cookie（`...; user=%7B%22access_token%22...%7D; ...`）
       - 只有 user cookie 的值（JSON，url-encoded 或原樣）
-      - 直接貼 JWT（eyJ... 開頭）
     """
     raw = (cookie_str or "").strip()
     if not raw:
-        return ""
-    if raw.startswith("eyJ"):
-        return raw.split(";")[0].strip()
-
+        return {}
     blob = raw
     if "user=" in raw:
         blob = raw.split("user=", 1)[1]
@@ -46,9 +42,27 @@ def extract_token(cookie_str: str) -> str:
             data = json.loads(candidate)
         except (ValueError, TypeError):
             continue
-        if isinstance(data, dict) and data.get("access_token"):
-            return str(data["access_token"])
-    return ""
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def extract_token(cookie_str: str) -> str:
+    """挖出 access_token，挖不到回空字串。除了 `user` cookie，也吃「直接貼 JWT」。"""
+    raw = (cookie_str or "").strip()
+    if raw.startswith("eyJ"):
+        return raw.split(";")[0].strip()
+    return str(parse_user_cookie(cookie_str).get("access_token") or "")
+
+
+def extract_refresh_token(cookie_str: str) -> str:
+    """挖出 refresh_token。
+
+    `user` cookie 裡除了 access_token 還有一顆 refresh_token，官方前端就是拿它去打
+    `/user/api/v1/refreshToken` 自動續命（access_token 剩不到 5 分鐘就換一張）。
+    有了它，profile 裡的舊 cookie 就不必然要手動重登。
+    """
+    return str(parse_user_cookie(cookie_str).get("refresh_token") or "")
 
 
 def token_remaining(token: str) -> float | None:
@@ -85,6 +99,36 @@ def describe_token(token: str) -> str:
     if remaining < 0:
         return f"已過期 {-remaining / 60:.0f} 分鐘"
     return f"剩 {remaining / 60:.0f} 分鐘"
+
+
+def refresh_access_token(session: cf_requests.Session, refresh_token: str) -> tuple[str, str]:
+    """用 refresh_token 換一張新的 access_token。回 (access_token, refresh_token)，失敗回 ("", "")。
+
+    這不是旁門左道 —— 官方前端自己就在用：它把 token 到期時間存在 cookie 裡，發現剩不到
+    5 分鐘（`-3e5` 毫秒）就先打這支換一張再繼續。我們只是照做。
+
+    **Authorization 帶的是 refresh_token，不是 access_token**（前端原始碼就是這樣寫的）。
+    回應長這樣：`{"errCode":"00","userInfo":{"access_token":…,"refresh_token":…}}`。
+
+    **refresh_token 是輪替的**（前端的 REFRESH_TOKEN mutation 會把它一起換掉），所以換完
+    一定要把新的兩顆寫回瀏覽器 cookie，不然瀏覽器手上那顆舊的就作廢了 —— 搶到票要跳
+    結帳頁時會被登出，客人就付不了款。寫回的部分在 browser_session.write_user_cookie()。
+    """
+    if not refresh_token:
+        return "", ""
+    try:
+        res = session.post(f"{USER_API}/refreshToken", json={},
+                           headers=build_headers(refresh_token), timeout=10)
+        data = res.json()
+    except Exception as e:
+        print(f"[TOKEN] 換發 access_token 失敗: {type(e).__name__}: {e}")
+        return "", ""
+    if str(data.get("errCode")) != "00":
+        print(f"[TOKEN] 換發被拒 errCode={data.get('errCode')} {data.get('errMsg', '')}"
+              f" —— refresh_token 也過期了，只能重新登入")
+        return "", ""
+    info = data.get("userInfo") or {}
+    return str(info.get("access_token") or ""), str(info.get("refresh_token") or "")
 
 
 def build_session(token: str = "") -> cf_requests.Session:
