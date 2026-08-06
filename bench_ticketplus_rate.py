@@ -19,6 +19,7 @@
 """
 import argparse
 import queue
+import random
 import statistics
 import sys
 import threading
@@ -34,18 +35,39 @@ STEP_REST = 5.0         # 兩段之間喘口氣，避免前一段的帳算到下
 DEFAULT_RATES = [1, 2, 3, 5, 8, 12]
 
 
-def build_url(event_id: str) -> tuple[str, int]:
-    """用真實活動組出偵測用的 /get URL。回 (url, 票種數)。"""
+def fetch_ids(event_id: str) -> tuple[list[str], list[str]]:
     probe = cf_requests.Session(impersonate="chrome124")
     cat = catalog.fetch_catalog(probe, event_id)
     products = [p["productId"] for p in cat.get("products", []) if p.get("productId")]
     areas = [a["ticketAreaId"] for a in cat.get("ticketAreas", []) if a.get("ticketAreaId")]
     if not products:
         raise SystemExit(f"活動 {event_id} 抓不到票種 —— id 是不是打錯，或活動已下架？")
-    params = ["productId=" + ",".join(products)]
-    if areas:
-        params.append("ticketAreaId=" + ",".join(areas))
-    return f"{CONFIG_API}/get?{'&'.join(params)}&", len(products)
+    return products, areas
+
+
+def make_url_factory(products: list[str], areas: list[str], bust: bool):
+    """回一個「產生 /get URL」的函式。
+
+    **bust=True 是這支工具的重點。** 票況 API 被 CloudFront 快取（TTL 約 1.5 秒），
+    照原樣打的話 3ms 就回來但拿到的是舊資料 —— 量到的是 CDN 不是後端，而且再怎麼
+    縮短輪詢間隔都只是重複讀同一份快取。
+
+    加 `&_=random` 沒有用（cache key 只認白名單參數，未知的直接忽略），但
+    **把 id 的順序打亂就會變成另一個 cache key**（照參數字串算），實測 8 發全 Miss。
+    7 個票種就有 5040 種排列，等於要多新鮮有多新鮮。
+
+    代價是每一發都真的打到東京的 origin，所以「安全速率」必須在 bust 模式下重量一次。
+    """
+    def factory() -> str:
+        p, a = products, areas
+        if bust:
+            p = random.sample(products, len(products))
+            a = random.sample(areas, len(areas)) if areas else areas
+        params = ["productId=" + ",".join(p)]
+        if a:
+            params.append("ticketAreaId=" + ",".join(a))
+        return f"{CONFIG_API}/get?{'&'.join(params)}&"
+    return factory
 
 
 class Worker(threading.Thread):
@@ -56,14 +78,14 @@ class Worker(threading.Thread):
     所以 worker 和 session 都在測試開始前就建好、整場重用。
     """
 
-    def __init__(self, url: str, jobs: queue.Queue, out: list, lock: threading.Lock):
+    def __init__(self, url_factory, jobs: queue.Queue, out: list, lock: threading.Lock):
         super().__init__(daemon=True)
-        self.url, self.jobs, self.out, self.lock = url, jobs, out, lock
+        self.url_factory, self.jobs, self.out, self.lock = url_factory, jobs, out, lock
         self.session = cf_requests.Session(impersonate="chrome124")
 
     def warm(self):
         try:
-            self.session.get(self.url, headers=build_headers(), timeout=10)
+            self.session.get(self.url_factory(), headers=build_headers(), timeout=10)
         except Exception:
             pass
 
@@ -74,7 +96,7 @@ class Worker(threading.Thread):
                 return
             t0 = time.perf_counter()
             try:
-                res = self.session.get(self.url, headers=build_headers(), timeout=10)
+                res = self.session.get(self.url_factory(), headers=build_headers(), timeout=10)
                 rtt = (time.perf_counter() - t0) * 1000
                 code = None
                 if res.status_code == 200:
@@ -82,16 +104,18 @@ class Worker(threading.Thread):
                         code = str(res.json().get("errCode"))
                     except Exception:
                         code = "非JSON"
-                rec = (res.status_code, code, rtt)
+                # 記 X-Cache 才知道這一發到底有沒有打到後端 —— 全是 Hit 的話
+                # 這輪速率測試等於沒測到東西
+                hit = "Hit" in (res.headers.get("x-cache") or "")
+                rec = (res.status_code, code, rtt, hit)
             except Exception as e:
-                rec = (0, type(e).__name__, (time.perf_counter() - t0) * 1000)
+                rec = (0, type(e).__name__, (time.perf_counter() - t0) * 1000, False)
             with self.lock:
                 self.out.append(rec)
             self.jobs.task_done()
 
 
-def run_step(url: str, rate: int, workers: list, jobs: queue.Queue,
-             out: list, lock: threading.Lock) -> dict:
+def run_step(rate: int, jobs: queue.Queue, out: list, lock: threading.Lock) -> dict:
     out.clear()
     interval = 1.0 / rate
     n = int(STEP_SECONDS * rate)
@@ -108,7 +132,7 @@ def run_step(url: str, rate: int, workers: list, jobs: queue.Queue,
         recs = list(out)
     rtts = sorted(r[2] for r in recs)
     codes = {}
-    for status, code, _ in recs:
+    for status, code, _, _ in recs:
         key = f"HTTP{status}" if status not in (200,) else f"errCode {code}"
         codes[key] = codes.get(key, 0) + 1
     # 被擋的定義跟 catalog.get_infos 一致：HTTP 403/429 或 errCode 110
@@ -116,6 +140,7 @@ def run_step(url: str, rate: int, workers: list, jobs: queue.Queue,
                   if k in ("HTTP403", "HTTP429") or k == "errCode 110")
     return {
         "rate": rate, "sent": len(recs), "blocked": blocked, "codes": codes,
+        "hits": sum(1 for r in recs if r[3]),
         "p50": statistics.median(rtts) if rtts else 0,
         "p95": rtts[int(len(rtts) * 0.95) - 1] if rtts else 0,
     }
@@ -126,12 +151,17 @@ def main():
     ap.add_argument("--event", required=True, help="活動 id（網址 /activity/ 後面那 32 碼）")
     ap.add_argument("--rates", type=int, nargs="+", default=DEFAULT_RATES,
                     help="要測的每秒請求數（由低到高）")
+    ap.add_argument("--bust", action="store_true",
+                    help="打亂 id 順序繞過 CloudFront 快取（**要量後端上限就一定要開**，"
+                         "不開的話幾乎全是快取命中，量到的是 CDN 不是伺服器）")
     args = ap.parse_args()
 
-    url, n_products = build_url(args.event)
+    products, areas = fetch_ids(args.event)
+    url_factory = make_url_factory(products, areas, args.bust)
     print("=" * 78)
-    print(f"目標  : {url[:70]}…")
-    print(f"票種數: {n_products}（一發請求查完整場，跟搶票時一樣）")
+    print(f"目標  : {url_factory()[:70]}…")
+    print(f"票種數: {len(products)}（一發請求查完整場，跟搶票時一樣）")
+    print(f"模式  : {'繞過快取（每發都打到東京 origin）' if args.bust else '照原樣（會吃 CloudFront 快取）'}")
     print(f"階梯  : {args.rates} req/s，每段 {STEP_SECONDS:.0f} 秒")
     print("=" * 78)
 
@@ -140,19 +170,19 @@ def main():
     jobs: queue.Queue = queue.Queue()
     out: list = []
     lock = threading.Lock()
-    workers = [Worker(url, jobs, out, lock) for _ in range(max_workers)]
+    workers = [Worker(url_factory, jobs, out, lock) for _ in range(max_workers)]
     for w in workers:
         w.warm()          # 先把 TLS 握完，第一段才不會被握手時間汙染
         w.start()
 
-    print(f"\n  {'req/s':>6} {'發出':>5} {'被擋':>5}  {'p50':>7} {'p95':>7}   回應分佈")
-    print("  " + "-" * 68)
+    print(f"\n  {'req/s':>6} {'發出':>5} {'快取':>5} {'被擋':>5}  {'p50':>7} {'p95':>7}   回應分佈")
+    print("  " + "-" * 74)
     hit = None
     for rate in args.rates:
-        r = run_step(url, rate, workers, jobs, out, lock)
+        r = run_step(rate, jobs, out, lock)
         dist = ", ".join(f"{k}×{v}" for k, v in sorted(r["codes"].items()))
         flag = "  ← 被擋" if r["blocked"] else ""
-        print(f"  {r['rate']:>6} {r['sent']:>5} {r['blocked']:>5}  "
+        print(f"  {r['rate']:>6} {r['sent']:>5} {r['hits']:>5} {r['blocked']:>5}  "
               f"{r['p50']:>6.0f}ms {r['p95']:>6.0f}ms   {dist}{flag}")
         if r["blocked"]:
             hit = rate
