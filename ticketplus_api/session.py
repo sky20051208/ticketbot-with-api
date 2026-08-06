@@ -8,6 +8,7 @@ cookie 取 access_token 塞 `authorization: Bearer <token>`，所以我們只要
 （這也是「在 DevTools 找不到 cookie」的原因：要看 Application → Cookies → `user`，
   不是 Network 的 request cookie。）
 """
+import base64
 import json
 import time
 from urllib.parse import unquote
@@ -48,6 +49,42 @@ def extract_token(cookie_str: str) -> str:
         if isinstance(data, dict) and data.get("access_token"):
             return str(data["access_token"])
     return ""
+
+
+def token_remaining(token: str) -> float | None:
+    """access_token 還剩幾秒有效；不是 JWT 或解不開回 None（當作「不知道」，不擋流程）。
+
+    **為什麼一定要有這個**（2026-08-06 實際在正式搶票時掛掉才補的）：userdata 模式是
+    去讀 profile 裡的 `user` cookie，而那顆 cookie 上次登入留下來就一直躺在那。
+    `open_and_login()` 看到有 token 就當成登入成功（log 上是「1 毫秒完成登入」），
+    等到 T-0 送單才發現 **errCode 103 token 無效**，整場就沒了。
+
+    TicketPlus 的 token 是 JWT，壽命只有 60 分鐘（實測 exp - iat = 3600）。payload 是
+    base64url 的 JSON，直接讀 `exp` 就好 —— 我們只需要判斷「還能不能用」，不需要驗簽
+    （簽章本來也只有官方驗得了）。
+    """
+    parts = (token or "").split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)      # base64url 慣例不帶 padding，要自己補
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+    except Exception:
+        return None
+    if not isinstance(exp, (int, float)):
+        return None
+    return float(exp) - time.time()
+
+
+def describe_token(token: str) -> str:
+    """給 log 用的一句話：還剩多久 / 過期多久。"""
+    remaining = token_remaining(token)
+    if remaining is None:
+        return "有效期未知"
+    if remaining < 0:
+        return f"已過期 {-remaining / 60:.0f} 分鐘"
+    return f"剩 {remaining / 60:.0f} 分鐘"
 
 
 def build_session(token: str = "") -> cf_requests.Session:

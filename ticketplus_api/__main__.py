@@ -29,7 +29,8 @@ from tixcraftapi import alerts
 from LineBot import line_push
 
 from ticketplus_api import catalog, parsing, reserve as tp_reserve
-from ticketplus_api.session import build_session, extract_token, warmup_session, make_keepalive
+from ticketplus_api.session import (build_session, describe_token, extract_token,
+                                    make_keepalive, token_remaining, warmup_session)
 from ticketplus_api import browser_session as tp_browser
 
 # 清票冷卻（對齊拓元 FSM，見 tixcraftapi/runner.py）：
@@ -224,6 +225,34 @@ def _warn_if_serial_required(session, targets):
               f"送單會被官方以 errCode 124 打回，請先填會員碼／問答題答案")
 
 
+async def _refresh_token_if_stale(token: str, tab) -> str:
+    """開搶前確認手上這顆 token 還活著；快過期就回瀏覽器重讀一次。
+
+    倒數可能跑很久（使用者常常提早一兩小時就掛著），而 TicketPlus 的 token 只活
+    60 分鐘 —— 光在登入時檢查有效期不夠，倒數期間它照樣會死。
+
+    **健康就完全不動**：T-0 的每一毫秒都不該花在無謂的 CDP 呼叫上，只有快過期時才
+    去讀。使用者若在倒數期間重新登入過，`user` cookie 會是新的，這裡就接得到。
+    """
+    remaining = token_remaining(token)
+    if remaining is None or remaining >= tp_browser.MIN_TOKEN_LIFE:
+        return token
+
+    if tab is None:
+        # 手貼 COOKIE 模式沒有瀏覽器可以重讀，只能提醒
+        print(f"[TOKEN] ⚠ token {describe_token(token)} —— 送單很可能被 errCode 103 打回，"
+              f"請重貼一份新的 COOKIE")
+        return token
+
+    print(f"[TOKEN] token {describe_token(token)}，回瀏覽器重讀一次")
+    fresh = await tp_browser.read_token(tab)
+    if fresh and fresh != token and (token_remaining(fresh) or 0) > (remaining or 0):
+        print(f"[TOKEN] 已換上新的 access_token（{describe_token(fresh)}）")
+        return fresh
+    print(f"[TOKEN] ⚠ 瀏覽器裡也是同一顆過期 token —— 請先登出再登入，否則送單會被打回")
+    return token
+
+
 async def main_async():
     event_id = parse_event_id(config.ACTIVITY_SLUG)
     print(f"[INIT] 活動 id: {event_id}")
@@ -247,6 +276,7 @@ async def main_async():
     else:
         print("[TIMER] 定時啟動已關閉，直接開搶")
 
+    token = await _refresh_token_if_stale(token, tab)
     outcome = poll_and_grab(session, plan, token)
 
     if outcome.get("orderId"):

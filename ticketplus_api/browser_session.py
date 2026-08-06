@@ -15,9 +15,13 @@ import nodriver as uc
 import browser_login as _tx   # 只借用 setup_proxy_bridge（跟站台無關）
 import config
 from ticketplus_api import BASE
-from ticketplus_api.session import extract_token
+from ticketplus_api.session import describe_token, extract_token, token_remaining
 
 READ_USER_COOKIE = "document.cookie.split('; ').find(c=>c.startsWith('user='))||''"
+
+# token 至少要還有這麼久才收：撐得過「建 plan + 倒數 + 送單」。
+# TicketPlus 的 token 只活 60 分鐘，profile 裡上次登入留下的那顆通常早就死了。
+MIN_TOKEN_LIFE = 120.0
 
 
 def activity_url(event_id: str) -> str:
@@ -79,14 +83,27 @@ async def open_and_login(user_data_dir: str, event_id: str,
     print(f"[LOGIN] 請在視窗右上角完成登入（最多 {timeout}s）...")
 
     deadline = time.monotonic() + timeout
+    warned_stale = False
     while time.monotonic() < deadline:
         token = await read_token(tab)
         if token:
-            print(f"[LOGIN] 登入完成，已取得 access_token（{len(token)} 字）")
-            return browser, tab, token
+            remaining = token_remaining(token)
+            # 解不開（remaining is None）就照收 —— 可能是官方換了 token 格式，
+            # 不該因為我們看不懂就把人擋在門外。
+            if remaining is None or remaining >= MIN_TOKEN_LIFE:
+                print(f"[LOGIN] 登入完成，已取得 access_token"
+                      f"（{len(token)} 字，{describe_token(token)}）")
+                return browser, tab, token
+            if not warned_stale:
+                warned_stale = True
+                # 這裡最容易誤會：畫面上通常還顯示登入中的狀態（前端不會自己去驗 exp），
+                # 所以一定要講明「先登出再登入」，不然使用者會以為已經登入而乾等。
+                print(f"[LOGIN] ⚠ profile 裡的 token {describe_token(token)}，不能用。")
+                print(f"[LOGIN]   TicketPlus 的 token 只活 60 分鐘，這是上次登入留下的。")
+                print(f"[LOGIN]   請在視窗右上角**先登出、再登入一次**（畫面可能仍顯示已登入，那是假的）")
         await asyncio.sleep(1.0)
 
-    print(f"[LOGIN] 超時 {timeout}s 未取得 token")
+    print(f"[LOGIN] 超時 {timeout}s 未取得可用的 token")
     return browser, tab, ""
 
 
