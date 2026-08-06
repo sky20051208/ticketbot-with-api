@@ -85,7 +85,17 @@ cloudflared --version
 log "開機自動補掛 OCI 次要私有 IP"
 # OCI 只把 IP 配給 VNIC，guest OS 不會自己掛上；`ip addr add` 又是暫時的。
 # rotate_ips.py --sync-os 直接跟 OCI 對帳，Console 上新增 IP 之後不用改設定檔。
-if [ -f "$HOME/rotate_ips.py" ] || [ -f "$REPO_DIR/rotate_ips.py" ]; then
+#
+# 這支腳本兩台機器共用（拓元在 Oracle 美東、遠大在 AWS 東京），所以要先認機房：
+# rotate_ips.py 走 OCI 的 Instance Principals，在 AWS 上必定失敗。光看檔案存不存在
+# 不夠 —— 那是同一個 repo，兩邊都有。
+IS_OCI=no
+if [ "$(cat /sys/class/dmi/id/chassis_asset_tag 2>/dev/null)" = "OracleCloud.com" ]; then
+    IS_OCI=yes
+fi
+if [ "$IS_OCI" != "yes" ]; then
+    echo "  （不是 OCI 機器，跳過 —— AWS 的公網 IP 由 aws_tokyo.py 管）"
+elif [ -f "$HOME/rotate_ips.py" ] || [ -f "$REPO_DIR/rotate_ips.py" ]; then
     SYNC_PY=$([ -f "$REPO_DIR/rotate_ips.py" ] && echo "$REPO_DIR/rotate_ips.py" || echo "$HOME/rotate_ips.py")
     sudo tee /etc/systemd/system/oci-secondary-ips.service > /dev/null <<EOF
 [Unit]
