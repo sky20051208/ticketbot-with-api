@@ -30,7 +30,19 @@ from botocore.exceptions import ClientError, NoCredentialsError
 
 REGION = "ap-northeast-1"           # 東京
 NAME = "ticketplus-tokyo"
-INSTANCE_TYPE = "m6i.xlarge"        # 4 vCPU / 16GB，非 burstable
+
+# **機型受 AWS Free plan 限制**：2025-07 之後開的帳號預設是 Free plan，只准開
+# 「免費方案合格」的機型，開 m6i.xlarge 會直接被 RunInstances 擋下來
+# （InvalidParameterCombination: not eligible for Free Tier）。
+# 東京的合格清單只有 6 種，最大的就是 m7i-flex.large。
+#
+# 8GB 夠不夠：實測 PSS 每組 Chrome 210MB + Python 80MB
+#   20 組 ≈ 5.8GB  → 舒服
+#   30 組 ≈ 8.7GB  → 會吃到 swap，會頓
+# 要跑滿 30 組就得去 Billing 把 Free plan 換成 Paid plan，然後 resize 成
+# m6i.xlarge（4 vCPU / 16GB）。機型隨時可以改，見下面的 resize。
+INSTANCE_TYPE = "m7i-flex.large"    # 2 vCPU / 8GB，Free plan 下最大的
+INSTANCE_TYPE_BIG = "m6i.xlarge"    # 4 vCPU / 16GB，換 Paid plan 後才開得了
 DISK_GB = 50                        # 30 組 Chrome profile 各約 64MB，再加 swap 和 repo
 # Canonical 官方維護的參數，永遠指向最新的 Ubuntu 24.04 AMI —— 比寫死 ami-xxxx 好，
 # 那個每次改版都會失效，而且每個 region 的 id 都不一樣
@@ -83,12 +95,16 @@ def ensure_key_pair() -> str:
     print(f"[KEY] 建立金鑰對 {NAME}")
     kp = c.create_key_pair(KeyName=NAME, KeyType="ed25519")
     KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    KEY_PATH.write_text(kp["KeyMaterial"])
-    # Windows 的 OpenSSH 會檢查權限，太寬鬆會拒絕使用；這裡只留當前使用者
+    # **一定要 write_bytes**：Windows 上 write_text 會把 \n 轉成 \r\n，OpenSSH 解析
+    # 私鑰時直接噴 "error in libcrypto"，而且私鑰只給這一次，弄壞就得重建整台機器。
+    KEY_PATH.write_bytes(kp["KeyMaterial"].encode())
+    # Windows 的 OpenSSH 會檢查權限，太寬鬆會拒絕使用；這裡只留當前使用者。
+    # 給 (R,W) 不是 (R) —— 只給讀的話連自己都改不動這個檔。
     if sys.platform == "win32":
+        import os
         import subprocess
         subprocess.run(["icacls", str(KEY_PATH), "/inheritance:r",
-                        "/grant:r", f"{Path.home().name}:R"],
+                        "/grant:r", f"{os.environ.get('USERNAME', Path.home().name)}:(R,W)"],
                        capture_output=True)
     else:
         KEY_PATH.chmod(0o600)
@@ -222,6 +238,34 @@ def status() -> None:
     print("=" * 62)
 
 
+def resize() -> None:
+    """換機型（例如 Free plan 升 Paid plan 之後換成 16GB 的）。機器必須先關機。
+
+    用法：python aws_tokyo.py resize [機型]，不給機型就換成 INSTANCE_TYPE_BIG。
+    """
+    inst = find_instance()
+    if not inst:
+        raise SystemExit("還沒建立機器")
+    target = sys.argv[2] if len(sys.argv) > 2 else INSTANCE_TYPE_BIG
+    if inst["State"]["Name"] != "stopped":
+        raise SystemExit(f"要先關機才能換機型：python aws_tokyo.py stop")
+    if inst["InstanceType"] == target:
+        print(f"[RESIZE] 已經是 {target} 了")
+        return
+    try:
+        ec2().modify_instance_attribute(InstanceId=inst["InstanceId"],
+                                        InstanceType={"Value": target})
+    except ClientError as e:
+        if "not eligible for Free Tier" in str(e):
+            raise SystemExit(
+                f"{target} 不在 Free plan 的允許清單裡。\n"
+                f"要用它得先到 AWS Console → Billing and Cost Management → "
+                f"Account plan，把 Free plan 換成 Paid plan（$100 額度照樣可以抵）。")
+        raise
+    print(f"[RESIZE] {inst['InstanceType']} → {target}")
+    status()
+
+
 def terminate() -> None:
     inst = find_instance()
     if not inst:
@@ -236,7 +280,7 @@ def terminate() -> None:
 
 def main():
     actions = {"create": create, "start": start, "stop": stop, "status": status,
-               "sync-ip": sync_ip, "terminate": terminate}
+               "sync-ip": sync_ip, "resize": resize, "terminate": terminate}
     if len(sys.argv) < 2 or sys.argv[1] not in actions:
         raise SystemExit(f"用法: python aws_tokyo.py [{' | '.join(actions)}]")
     try:
