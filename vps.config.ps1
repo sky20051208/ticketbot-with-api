@@ -58,6 +58,28 @@ $VpsBootTimeoutSec = 240
 $VpsStreamFps         = 60
 $VpsStreamBitrateKbps = 15000   # 上限不是固定值；壓在路徑上限之下避免自己塞爆線路
 
+# ── 遠大 TicketPlus 的東京機（AWS ap-northeast-1）─────────────────────────
+# 跟拓元那台是兩碼事：tixcraft 的 origin 在美東、TicketPlus 的在 AWS 東京，
+# 剛好相反，不能共用一台。實測東京→遠大 queue 只有 2.1ms（台灣 66ms）。
+#
+# EC2 的開關機 / 安全群組同步都在 aws_tokyo.py（boto3），這裡只管通道和埠。
+# 本機這側的埠全部錯開，三個 War-Room 才能同時開著：
+#   7860 本機 / 7861 拓元美東 / 7862 遠大東京
+$TokyoGuiLocalPort  = 7862
+$TokyoGuiRemotePort = 7860
+$TokyoVncRawLocalPort  = 5901   # 原生 VNC（備援，只需要 22 埠）
+$TokyoVncRawRemotePort = 5900
+$TokyoSunshineLocalPort  = 47991  # Sunshine 管理介面（配對輸入 PIN）
+$TokyoSunshineRemotePort = 47990
+$TokyoKeyPath = "$env:USERPROFILE\.ssh\ticketplus-tokyo.pem"
+$TokyoUser = "ubuntu"
+# 這台只有 2 核，60fps 編碼會吃掉約一半的機器（拓元那台 4 核只吃 21%）。
+# 平常看畫面 30fps 就夠，搶票時本來就不該盯著串流。
+$TokyoStreamFps = 30
+$TokyoStreamBitrateKbps = 15000
+$TokyoTunnelPidFile = Join-Path $env:TEMP "ticketplus_tokyo_tunnel.pid"
+$TokyoIpFile = Join-Path $env:TEMP "ticketplus_tokyo_ip.txt"
+
 # 通道 process 的 PID 記在這，stop 腳本用它收乾淨
 $VpsTunnelPidFile = Join-Path $env:TEMP "tixcraft_vps_tunnel.pid"
 # 開機後把當下的公網 IP 寫在這，vps_moonlight.ps1 直接讀，省一次 OCI 查詢

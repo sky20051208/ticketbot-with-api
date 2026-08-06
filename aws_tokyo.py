@@ -266,6 +266,19 @@ def resize() -> None:
     status()
 
 
+def ip_only() -> None:
+    """只印公網 IP（給 PowerShell 腳本讀，不要有別的雜訊）。關機中就什麼都不印。"""
+    inst = find_instance()
+    if inst and inst.get("PublicIpAddress"):
+        print(inst["PublicIpAddress"])
+
+
+def state_only() -> None:
+    """只印狀態給面板讀。EC2 回的鍵是 `State.Name`（大寫 N），沒有機器就印 none。"""
+    inst = find_instance()
+    print(inst["State"]["Name"] if inst else "none")
+
+
 def terminate() -> None:
     inst = find_instance()
     if not inst:
@@ -280,7 +293,8 @@ def terminate() -> None:
 
 def main():
     actions = {"create": create, "start": start, "stop": stop, "status": status,
-               "sync-ip": sync_ip, "resize": resize, "terminate": terminate}
+               "sync-ip": sync_ip, "resize": resize, "ip": ip_only,
+               "state": state_only, "terminate": terminate}
     if len(sys.argv) < 2 or sys.argv[1] not in actions:
         raise SystemExit(f"用法: python aws_tokyo.py [{' | '.join(actions)}]")
     try:
