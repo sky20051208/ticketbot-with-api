@@ -183,7 +183,12 @@ def make_keepalive(session: cf_requests.Session, product_ids: list[str],
 
     **只暖票況網域，刻意不碰 queue.ticketplus.com.tw**（2026-07-29 決定）：搶票前對排隊
     系統發任何請求都跟「還沒要買票」的正常使用者行為不符，寧可讓第一發 enqueue 自己付
-    TLS 握手（實測貴約 0.6s），也不要在對方的排隊系統留下多餘足跡。
+    TLS 握手，也不要在對方的排隊系統留下多餘足跡。
+
+    這個代價 2026-08-06 量準了：純 TCP+TLS 到 queue 網域是 **175ms**（TCP 66 + TLS 107；
+    那台還在 TLS 1.2，握手要兩個往返，apis 是 1.3 只要 61ms）。原本註解寫「約 0.6s」
+    是高估。同日一次實測第一發 enqueue 花 2437ms，扣掉握手還有 2.2s —— 那是伺服器端
+    在建排隊，不是我們的連線成本，暖機也省不掉。
 
     最後 stop_before 秒停手，不讓網路 IO 影響倒數精度。"""
     url = f"{CONFIG_API}/get?productId={','.join(product_ids)}&"
