@@ -8,6 +8,8 @@
 
 本檔只負責拿資料，挑哪一個交給 [parsing.py](ticketplus_api/parsing.py)。
 """
+import math
+import random
 import time
 
 from curl_cffi import requests as cf_requests
@@ -16,6 +18,11 @@ from ticketplus_api import CONFIG_API
 from ticketplus_api.session import build_headers
 
 _S3 = f"{CONFIG_API}/getS3"
+
+# 變體數低於這個就沒有繞過快取的意義：TTL 約 1.5s、輪詢 0.3s 代表一個 TTL 內會打 5 發，
+# 變體太少就會在快取還沒過期時就轉回同一個 key。留 4 倍餘裕。
+_MIN_VARIANTS = 20
+_warned_variants = False
 
 
 def _get_json(session: cf_requests.Session, url: str, timeout: float = 10.0) -> dict:
@@ -46,6 +53,49 @@ def fetch_catalog(session: cf_requests.Session, event_id: str) -> dict:
     return catalog
 
 
+def _fresh_params(product_ids: list[str] | None,
+                  ticket_area_ids: list[str] | None) -> list[str]:
+    """組 `/get` 的 query string，並且**每次都換一個 CloudFront cache key**。
+
+    這支 API 被 CloudFront 快取，TTL 約 1.5 秒（實測 `X-Cache` 由 Hit 轉 Miss 的週期）。
+    照原樣打的話 3ms 就回來，但拿到的是最多 1.5 秒前的舊票況 —— 偵測延遲直接被綁死在
+    ~900ms，**而且再怎麼縮短輪詢間隔都沒用，只是重複讀同一份快取**。
+
+    繞法是把 id 的順序打亂：cache key 是照參數字串算的，`p1,p2` 和 `p2,p1` 是兩個不同
+    的 key，但回應內容完全一樣。實測連打 8 發全是 Miss，每發都真的回東京 origin。
+    安全性也確認過：`parsing.index_infos()` 是用 `id` 建字典的（`{p["id"]: p}`），
+    完全不看順序，所以打亂請求順序不影響任何下游判斷。
+
+    試過但不能用的兩招：
+      - 加 `&_=<亂數>`：cache key 只認白名單參數（productId / ticketAreaId），未知的
+        直接忽略 → 還是 Hit
+      - 重複同一個 id 當變體：行為不一致，重複 2 次回 errCode 102、3 次才又正常，
+        不能拿來當機制
+
+    代價是每一發都打到 origin 而不是吃 CDN。單一 IP 實測到 12 req/s 都沒被節流
+    （p50 平平的 170ms 沒劣化），但**多開時總速率是 N 倍**，間隔要自己乘回去。
+
+    票種和票區都只有 1~2 個的活動排列數不夠，這時就退回原本的行為 —— 不會更糟，
+    只是沒有變好。
+    """
+    global _warned_variants
+    products = list(product_ids or [])
+    areas = list(ticket_area_ids or [])
+
+    variants = math.factorial(len(products)) * math.factorial(len(areas))
+    if variants < _MIN_VARIANTS and not _warned_variants:
+        _warned_variants = True
+        print(f"[INFO] 這場只有 {len(products)} 票種 / {len(areas)} 票區，"
+              f"排列組合只有 {variants} 種，繞不過 CDN 快取（偵測會慢約 1 秒）")
+
+    params = []
+    if products:
+        params.append("productId=" + ",".join(random.sample(products, len(products))))
+    if areas:
+        params.append("ticketAreaId=" + ",".join(random.sample(areas, len(areas))))
+    return params
+
+
 def get_infos(session: cf_requests.Session, product_ids: list[str] | None = None,
               ticket_area_ids: list[str] | None = None,
               timeout: float = 10.0, log: bool = True) -> tuple[dict, bool]:
@@ -57,12 +107,7 @@ def get_infos(session: cf_requests.Session, product_ids: list[str] | None = None
     blocked=True 代表被流量管制/擋（HTTP 429/403 或 errCode 110 流量管制）→ 呼叫端該退避，
     對齊拓元撞 403 的 BLOCKED cooldown（被擋還用 0.3s 狂打只會更慘）。
     """
-    params = []
-    if product_ids:
-        params.append("productId=" + ",".join(product_ids))
-    if ticket_area_ids:
-        params.append("ticketAreaId=" + ",".join(ticket_area_ids))
-    url = f"{CONFIG_API}/get?{'&'.join(params)}&"
+    url = f"{CONFIG_API}/get?{'&'.join(_fresh_params(product_ids, ticket_area_ids))}&"
 
     t0 = time.perf_counter()
     try:
