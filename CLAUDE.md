@@ -150,6 +150,7 @@ GUI 寫出的 JSON key 必須和 config.py 變數名一字不差：
 - **多開隔離**：每個 instance 獨立資料夾 `profiles/acc_{id}/`
 - **PAUSE 按鈕目前無效**：GUI 寫 `pause.lock` 但 tixcraftapi / kktix_api 都沒讀（舊 `check_pause()` 在已刪的 bot.py），只有 START / STOP 有作用。要恢復得在 FSM 迴圈加 pause.lock 輪詢
 - **定時啟動**：`config.ENABLE_TIME_WATCHER = False` 時所有平台直接開搶、不等 `TARGET_START_TIME`（GUI「定時啟動」checkbox 就是這個）
+- **時間一律用 [timeWatcher.py](timeWatcher.py) 的 `taipei_now()`，不要用 `datetime.now()`**：兩台 VPS 的 OS 時區都是 `Etc/UTC`（伺服器慣例，跟機房在東京還是美東無關），`datetime.now()` 在那裡回的是 UTC，當成台北時間就差 8 小時 —— `TARGET_START_TIME="12:00:00"` 會等到台灣晚上 8 點。2026-08-07 在東京機實測抓到，`TimeWatcher.sync_with_ntp` 和 `tixcraftapi.wait_until_t_minus` 都中過。**本機開發看不出來**（Windows 就在 UTC+8，兩者剛好相等），而且 NTP 那條路才是壞的、HTTP fallback 有做 `astimezone` —— 所以還會因為 NTP 通不通而行為不一致。倒數的 log 現在會印機器時區，「本地系統時間」跟「台北標準時間」差 8 小時是正常的，要盯的是後者
 - **驗證碼 DOM ID**（硬編在 [captchaAI/predict.py](captchaAI/predict.py) 的 `CAPTCHA_IMAGE_ID`，**不要放回 config**，config.py 的 `Selector` class 是遺留物）：輸入框 `TicketForm_verifyCode`、圖片 `TicketForm_verifyCode-image`
 - **GUI 啟動**：`python run_webgui.py`（預設 `127.0.0.1:7860`，需先 `pip install fastapi uvicorn`）。`chrome_profile` 下拉在載入 / INIT 時掃 `chrome_profiles/`，新增後要重整網頁才出現
 

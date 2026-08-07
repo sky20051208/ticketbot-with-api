@@ -8,6 +8,20 @@ import ntplib
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
+TAIPEI = timezone(timedelta(hours=8))
+
+
+def taipei_now() -> datetime:
+    """現在的台北時間（naive），**跟機器時區無關**。
+
+    不要用 `datetime.now()` 當台北時間：本機開發是 Asia/Taipei 所以剛好相等，
+    但兩台搶票 VPS 的時區都是 Etc/UTC（伺服器慣例），那裡 `datetime.now()` 回的是
+    UTC，拿去比 TARGET_START_TIME 會整整差 8 小時 —— 設 12:00 開賣會等到台灣晚上
+    8 點才動。2026-08-07 在東京機上實測確認過。
+    """
+    return datetime.now(TAIPEI).replace(tzinfo=None)
+
+
 class TimeWatcher:
     def __init__(self, target_time_str, target_url, lead_seconds=0.9):
         self.target_time_str = target_time_str
@@ -58,8 +72,17 @@ class TimeWatcher:
             return None
 
         offset, delay, server = best
-        self.time_offset = timedelta(seconds=offset)
-        tw_now = datetime.fromtimestamp(time.time()) + self.time_offset
+        # resp.offset 只是「NTP 時間 − 本機時鐘」的毫秒級誤差，**完全不含時區**。
+        # 直接拿它當 time_offset 的話，後面 `datetime.fromtimestamp(now) + offset`
+        # 得到的是「機器當地時間」而不是台北時間 —— 在 Etc/UTC 的 VPS 上差 8 小時。
+        # （HTTP fallback 那幾條路本來就有做 astimezone，所以只有這裡是壞的，
+        #   而且會因為 NTP 通不通而行為不一致，特別難查。）
+        #
+        # self.time_offset 的語意統一定義成「真實台北牆上時間 − 機器牆上時間」：
+        # 本機（UTC+8）約等於 0，VPS（UTC）約等於 8 小時。
+        true_epoch = time.time() + offset
+        tw_now = datetime.fromtimestamp(true_epoch, TAIPEI).replace(tzinfo=None)
+        self.time_offset = tw_now - datetime.fromtimestamp(time.time())
         print(f"✔ NTP 對時完成（採用 {server}, offset={offset*1000:+.1f}ms, delay={delay*1000:.1f}ms）")
         return tw_now
 
@@ -167,7 +190,10 @@ class TimeWatcher:
         
         print(f"✅ 對時完成！")
         print(f"   - 台北標準時間: {now_tw.strftime('%Y-%m-%d %H:%M:%S')} (已校正)")
-        print(f"   - 本地系統時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # 印出機器時區：VPS 是 UTC、本機是 CST，這兩行差 8 小時是正常的。
+        # 真正該盯的是上面「台北標準時間」那行對不對。
+        print(f"   - 本地系統時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+              f"(機器時區 {time.strftime('%Z')})")
         print(f"   - 鎖定目標時間: {self.target_time.strftime('%Y-%m-%d %H:%M:%S')} (GMT+8)")
         
         # 顯示誤差 (若本地時間錯誤，這裡的數值會很大，這是正常的修正)

@@ -22,7 +22,7 @@ import proxy_pool
 import browser_login
 from captchaAI.predict import warmup_ocr
 from LineBot import line_push
-from timeWatcher import TimeWatcher
+from timeWatcher import TimeWatcher, taipei_now
 
 from tixcraftapi import BASE
 from tixcraftapi.session import (build_session, build_headers, warmup_session,
@@ -115,13 +115,16 @@ def make_main_thread_keepalive(session, slug: str, interval: float = 15.0,
 
 
 def wait_until_t_minus(target_time_str: str, t_minus_seconds: float = 300.0):
-    """粗略等到 T-(t_minus_seconds)秒（本機時鐘，誤差幾秒內可接受）。
+    """粗略等到 T-(t_minus_seconds)秒（誤差幾秒內可接受）。
     主用途：proxy 啟用時延遲到搶票前 5 分鐘才連線，避開 sticky session 過期。
-    後續 wait_until_start 會做精準對時。"""
-    today = datetime.now().date()
+    後續 wait_until_start 會做精準對時。
+
+    時間一律用 `taipei_now()` 而不是 `datetime.now()` —— VPS 的時區是 Etc/UTC，
+    後者會讓整段等待偏移 8 小時（見 timeWatcher.taipei_now 說明）。"""
+    today = taipei_now().date()
     t = datetime.strptime(target_time_str, "%H:%M:%S").time()
     target = datetime.combine(today, t)
-    if target < datetime.now():
+    if target < taipei_now():
         target += timedelta(days=1)
 
     print(f"[STAGE] 階段一：等到 T-{int(t_minus_seconds)}s 才連 proxy（避開 sticky session 過期）")
