@@ -41,7 +41,7 @@ def build_session(cookie_str: str, local_ip: str = "") -> cf_requests.Session:
     proxies = proxy_pool.as_dict(config.CURRENT_PROXY)
     if proxies:
         session.proxies = proxies
-        print(f"[SESSION] 走代理: {config.CURRENT_PROXY}")
+        print(f"[SESSION] 走代理: {proxy_pool.redact(config.CURRENT_PROXY)}")
     return session
 
 

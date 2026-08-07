@@ -1,3 +1,5 @@
+from urllib.parse import urlsplit
+
 import config
 from curl_cffi import requests as cf_requests
 
@@ -64,3 +66,23 @@ def as_dict(proxy: str) -> dict:
         return {}
     url = proxy if proxy.startswith("http") else f"http://{proxy}"
     return {"http": url, "https": url}
+
+
+def redact(proxy: str) -> str:
+    """proxy URL → 可以安全印進 log 的字串（節點 + sid，**不含帳號密碼**）。
+
+    要有這支是因為 proxy URL 長成 `http://user:password@host:port`，整串印出去
+    等於公開 CliProxy 帳密 —— 而這些 log 會被 webgui 直接顯示在網頁上、也常被
+    截圖貼給別人看。診斷真正需要的只有「走哪個節點、哪個 sid」。
+    """
+    if not proxy:
+        return "（無）"
+    p = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+    sid = ""
+    if p.username:
+        parts = p.username.split("-")
+        if "sid" in parts:
+            i = parts.index("sid")
+            if i + 1 < len(parts):
+                sid = f" sid={parts[i + 1]}"
+    return f"{p.hostname}:{p.port}{sid}"

@@ -109,7 +109,11 @@ def setup_proxy_bridge(proxy_url: str) -> int | None:
         return None
     p = parse_proxy_url(proxy_url)
     if not (p["host"] and p["port"]):
-        print(f"[PROXY-CHROME] URL 解析失敗: {proxy_url} — Chrome 改走直連")
+        # 不要把 proxy_url 原樣印出來 —— 它含帳號密碼，而「解析失敗」正是使用者
+        # 會複製整段 log 貼出來求救的時候。憑證一定在最後一個 '@' 之前，所以只印
+        # '@' 之後那段（host:port，也正是解析失敗的地方），怎麼壞都不會帶到密碼。
+        print(f"[PROXY-CHROME] URL 解析失敗（{len(proxy_url)} 字，"
+              f"@ 之後是 {proxy_url.rsplit('@', 1)[-1]!r}）— Chrome 改走直連")
         return None
 
     # 起 localhost bridge 自動塞 auth header（Chrome 那端不用處理認證）

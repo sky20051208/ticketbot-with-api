@@ -137,7 +137,7 @@ def build_session(token: str = "") -> cf_requests.Session:
     proxies = proxy_pool.as_dict(config.CURRENT_PROXY)
     if proxies:
         session.proxies = proxies
-        print(f"[SESSION] 走代理: {config.CURRENT_PROXY}")
+        print(f"[SESSION] 走代理: {proxy_pool.redact(config.CURRENT_PROXY)}")
     print(f"[SESSION] impersonate={_IMPERSONATE} token={'有' if token else '無'}")
     return session
 
