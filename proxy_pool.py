@@ -18,10 +18,15 @@ def cliproxy_region() -> str:
     return getattr(config, "CLIPROXY_REGION", "") or "TW"
 
 
-def _build_cliproxy_url() -> str:
-    """組 CliProxy 認證 URL；sid 用 ACC_ID 確保多開時每個 instance 拿到不同出口 IP。"""
+def _build_cliproxy_url(sid_suffix: str = "") -> str:
+    """組 CliProxy 認證 URL；sid 用 ACC_ID 確保多開時每個 instance 拿到不同出口 IP。
+
+    sid_suffix 是「這顆 IP 不能用，換一顆」用的 —— sticky session 綁在 sid 上，
+    不改 sid 重連拿到的是同一顆 IP。**只能加英數**（sid 裡有連字號會被 CliProxy
+    當成分隔符、靜默退回帳號預設 IP，見 CLAUDE.md 的 sid 坑）。
+    """
     user = config.CLIPROXY_USERNAME_TEMPLATE.format(
-        acc_id=config.ACC_ID, region=cliproxy_region())
+        acc_id=f"{config.ACC_ID}{sid_suffix}", region=cliproxy_region())
     return f"http://{user}:{config.CLIPROXY_PASSWORD}@{config.CLIPROXY_HOST}:{config.CLIPROXY_PORT}"
 
 
@@ -46,6 +51,13 @@ VALIDATE_TIMEOUT = 12  # sg2 新加坡節點正常 < 3s 完成；留 buffer 防�
 MAX_VALIDATE_TRIES = 3
 
 
+# 住宅代理的 IP 是跟別人共用的，難免抽到已經被目標站台燒掉的那幾顆。
+# 403 = 被擋、429 = 被限流，這兩種**不能當成驗證通過**（舊版 `status_code < 500`
+# 會直接放行 403，整場搶票就綁在一顆進不去的 IP 上）。
+# 401 是 eps 的挑戰頁，代表 IP 沒問題、只是還沒解挑戰 —— 那是正常的。
+BLOCKED_CODES = (403, 429)
+
+
 def _validate(proxy: str) -> bool:
     try:
         r = cf_requests.get(
@@ -54,10 +66,13 @@ def _validate(proxy: str) -> bool:
             impersonate="chrome124",
             timeout=VALIDATE_TIMEOUT,
         )
-        return r.status_code < 500
     except Exception as e:
         print(f"[PROXY] 驗證失敗: {type(e).__name__}: {e}")
         return False
+    if r.status_code in BLOCKED_CODES:
+        print(f"[PROXY] 這顆出口 IP 被擋（HTTP {r.status_code}）—— 換一顆")
+        return False
+    return r.status_code < 500
 
 
 def _echo_ip(proxy: str) -> None:
@@ -70,22 +85,28 @@ def _echo_ip(proxy: str) -> None:
 
 
 def acquire() -> str:
-    """啟用 PROXY POOL 時建立 CliProxy 連線；不同 ACC_ID = 不同 sid = 不同 IP。"""
+    """啟用 PROXY POOL 時建立 CliProxy 連線；不同 ACC_ID = 不同 sid = 不同 IP。
+
+    驗不過就**換 sid 再抽一顆**，不是拿同一條重連 —— sticky session 綁在 sid 上，
+    同 sid 重連拿到的永遠是同一顆 IP，舊版那樣重試 3 次等於原地打轉。
+    """
     if not config.ENABLE_PROXY_POOL:
         return ""
 
     _warn_if_node_region_mismatch()
-    proxy_url = _build_cliproxy_url()
     print(f"[PROXY] CliProxy 啟用 (acc={config.ACC_ID}, "
           f"{config.CLIPROXY_HOST} region={cliproxy_region()})")
     for i in range(1, MAX_VALIDATE_TRIES + 1):
+        # 第一次用乾淨的 sid（跟 create_profile 那邊對得起來），之後才加後綴換 IP
+        suffix = "" if i == 1 else f"r{i}"
+        proxy_url = _build_cliproxy_url(suffix)
         if _validate(proxy_url):
             config.CURRENT_PROXY = proxy_url
             _echo_ip(proxy_url)
             return proxy_url
-        print(f"[PROXY] 第 {i}/{MAX_VALIDATE_TRIES} 次驗證失敗，重試中...")
+        print(f"[PROXY] 第 {i}/{MAX_VALIDATE_TRIES} 顆不能用，換 sid 再抽…")
 
-    print("[PROXY] CliProxy 連不上")
+    print("[PROXY] 連抽 3 顆都不能用 —— 可能是 CliProxy 帳號問題，或這個地區的 IP 被大量封鎖")
     config.CURRENT_PROXY = ""
     return ""
 
