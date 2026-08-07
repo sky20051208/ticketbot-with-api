@@ -1,6 +1,7 @@
 # timeWatcher.py (V19.0 UtimeTool 網站對時版)
 
 import requests
+import statistics
 import time
 import sys
 import asyncio
@@ -78,17 +79,73 @@ class TimeWatcher:
         # （HTTP fallback 那幾條路本來就有做 astimezone，所以只有這裡是壞的，
         #   而且會因為 NTP 通不通而行為不一致，特別難查。）
         #
-        # self.time_offset 的語意統一定義成「真實台北牆上時間 − 機器牆上時間」：
-        # 本機（UTC+8）約等於 0，VPS（UTC）約等於 8 小時。
-        true_epoch = time.time() + offset
-        tw_now = datetime.fromtimestamp(true_epoch, TAIPEI).replace(tzinfo=None)
-        self.time_offset = tw_now - datetime.fromtimestamp(time.time())
+        # 換算交給 _apply_offset —— 跟 HTTP fallback 共用同一套 time_offset 語意，
+        # 免得兩條路又各自解讀一次時區。
+        tw_now = self._apply_offset(offset)
         print(f"✔ NTP 對時完成（採用 {server}, offset={offset*1000:+.1f}ms, delay={delay*1000:.1f}ms）")
         return tw_now
 
-    def sync_with_website(self):
+    def _http_clock_offset(self, url, label, samples=8, interval=0.15):
+        """用 HTTP `Date` 標頭量「伺服器時鐘 − 本機時鐘」，回秒數（拿不到回 None）。
+
+        HTTP `Date` 只到「秒」，所以**單發讀取誤差最大 1 秒**，而且是系統性的：
+        Date 永遠 ≤ 真實時間，等於平均把時間看早 0.5 秒 —— 換算成搶票就是平均晚
+        0.5 秒、最糟晚 1 秒才動手。舊版就是單發讀完直接加 rtt/2 當精確值。
+
+        解法跟 time.navyism.com 那類對時網站一樣，只是換個等價但更嚴謹的寫法 ——
+        **區間交集**：
+          一發請求送出 t0、收到 t1、回應 Date=D（該秒的起點）。伺服器產生標頭的
+          瞬間必定落在 [D, D+1)，而那瞬間在本機時鐘上約是 m=(t0+t1)/2。
+          => offset ∈ [D-m, D+1-m)
+        每發都給一個寬 1 秒的區間，取交集就會收斂到 RTT 等級（實測 8 發約 ±30ms）。
+
+        注意這量到的是**回應那台機器**的時鐘。掛 CDN 的網址（拓元 Fastly、遠大
+        CloudFront）每發可能打到不同邊緣節點、各有各的時鐘，區間會交不出東西 ——
+        真發生就回 None 換下一個來源，不要硬湊。（2026-08-07 實測：遠大直連
+        origin 的 queue / api 跟 NTP 差 +2ms / −4ms，而 CloudFront 那兩支交集矛盾。）
         """
-        對時主入口：優先 NTP（~5-15ms 精度），失敗 fallback HTTP Date。
+        lo, hi, used, rtts = -1e9, 1e9, 0, []
+        for _ in range(samples):
+            try:
+                t0 = time.time()
+                resp = requests.head(url, headers=self.headers, timeout=3)
+                t1 = time.time()
+            except Exception as e:
+                print(f"  ⚠️ {label} 請求失敗 ({type(e).__name__})")
+                return None
+            d = resp.headers.get("Date")
+            if not d:
+                print(f"  ⚠️ {label} 沒有 Date 標頭")
+                return None
+            D = parsedate_to_datetime(d).timestamp()
+            m = (t0 + t1) / 2
+            lo, hi = max(lo, D - m), min(hi, D + 1 - m)
+            used += 1
+            rtts.append((t1 - t0) * 1000)
+            if lo > hi:
+                print(f"  ⚠️ {label} 區間矛盾（多半是 CDN 多節點各有時鐘），跳過")
+                return None
+            time.sleep(interval)
+
+        offset = (lo + hi) / 2
+        print(f"  ✔ {label} 對時成功（offset={offset*1000:+.0f}ms, "
+              f"不確定 ±{(hi-lo)*500:.0f}ms, rtt={statistics.median(rtts):.0f}ms, {used} 發）")
+        return offset
+
+    def _apply_offset(self, clock_offset):
+        """把「伺服器/NTP 時鐘 − 本機時鐘」換算成 self.time_offset 的語意
+        （真實台北牆上時間 − 機器牆上時間），回當下的台北時間。"""
+        true_epoch = time.time() + clock_offset
+        tw_now = datetime.fromtimestamp(true_epoch, TAIPEI).replace(tzinfo=None)
+        self.time_offset = tw_now - datetime.fromtimestamp(time.time())
+        return tw_now
+
+    def sync_with_website(self):
+        """對時主入口：優先 NTP（~2-15ms），失敗才退 HTTP Date（~±30ms）。
+
+        NTP 為主是實測過的選擇，不是預設值：搶票要對的是「開賣那台機器的時鐘」，
+        而 2026-08-07 從東京量到遠大直連 origin 的 queue/api 跟 NTP 只差 +2ms/−4ms
+        （小於量測誤差），代表對方本來就有 NTP 同步。改對 HTTP Date 只會更差。
         """
         # ── Primary: NTP ──
         print("⏳ 嘗試 NTP 對時（毫秒級精度）...")
@@ -96,66 +153,18 @@ class TimeWatcher:
         if ntp_result:
             return ntp_result
 
-        # ── Fallback: tixcraft HTTP Date ──
-        print("⚠️ NTP 全部失敗，fallback 到 tixcraft HTTP Date...")
-        try:
-            start_req = time.time()
-            resp = requests.head(self.time_source_url, headers=self.headers, timeout=5)
-            end_req = time.time()
-            rtt = end_req - start_req
+        # ── Fallback: HTTP Date（秒邊界偵測）──
+        print("⚠️ NTP 全部失敗，fallback 到 HTTP Date 對時...")
+        for url, label in ((self.time_source_url, "tixcraft"),
+                           (self.fallback_url_2, "utimetool"),
+                           ("https://www.google.com", "google")):
+            offset = self._http_clock_offset(url, label)
+            if offset is not None:
+                return self._apply_offset(offset)
 
-            if "Date" in resp.headers:
-                server_time_gmt = parsedate_to_datetime(resp.headers["Date"])
-                tw_timezone = timezone(timedelta(hours=8))
-                server_time_tw = server_time_gmt.astimezone(tw_timezone).replace(tzinfo=None)
-                corrected_tw_time = server_time_tw + timedelta(seconds=rtt/2)
-                local_now = datetime.fromtimestamp(end_req)
-                self.time_offset = corrected_tw_time - local_now
-                return corrected_tw_time
-            else:
-                print(f"⚠️ 網站未回傳 Date 標頭，嘗試備案...")
-                return self.fallback_google_time()
-
-        except Exception as e:
-            print(f"⚠️ tixcraft 對時失敗 ({e})，切換 utimetool...")
-            return self._sync_fallback(self.fallback_url_2, label="utimetool")
-
-        return datetime.now()
-
-    def _sync_fallback(self, url, label):
-        """通用 fallback：抓 url 的 Date header 對時，再失敗就 google。"""
-        try:
-            start = time.time()
-            resp = requests.head(url, headers=self.headers, timeout=3)
-            end = time.time()
-            rtt = end - start
-            if "Date" in resp.headers:
-                gmt = parsedate_to_datetime(resp.headers["Date"])
-                tw_time = (gmt.astimezone(timezone(timedelta(hours=8)))
-                              .replace(tzinfo=None)
-                           + timedelta(seconds=rtt / 2))
-                self.time_offset = tw_time - datetime.fromtimestamp(end)
-                print(f"  ✔ {label} 對時成功 (rtt={rtt*1000:.0f}ms)")
-                return tw_time
-        except Exception as e:
-            print(f"  ⚠️ {label} 失敗 ({e})")
-        print("  → 嘗試 google fallback...")
-        return self.fallback_google_time()
-
-    def fallback_google_time(self):
-        """備案：萬一 UtimeTool 掛了，去抓 Google"""
-        try:
-            start = time.time()
-            resp = requests.head("https://www.google.com", timeout=3)
-            end = time.time()
-            if "Date" in resp.headers:
-                gmt = parsedate_to_datetime(resp.headers["Date"])
-                tw_time = gmt.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
-                self.time_offset = (tw_time + timedelta(seconds=(end-start)/2)) - datetime.fromtimestamp(end)
-                return tw_time
-        except:
-            pass
-        return datetime.now()
+        # 全都失敗：至少把時區處理對，不要拿機器當地時間當台北時間
+        print("❌ 所有對時來源都失敗，只能用本機時鐘（VPS 上請確認時區）")
+        return self._apply_offset(0.0)
 
     def _calculate_target_datetime(self, current_tw_time):
         """根據「當下台北時間」決定目標是今天還是明天"""
