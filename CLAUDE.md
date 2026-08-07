@@ -112,6 +112,7 @@ DevTools → Application → Cookies → `user`。`extract_token()` 吃整串 co
 
 - `config.COOKIE_SOURCE = "string"` → 直接用 `config.COOKIE` 字串
 - `config.COOKIE_SOURCE = "userdata"` → bot 用 `config.CHROME_USER_DATA_DIR` 的 Chrome profile 開瀏覽器自己抓 cookie（[browser_login.py](browser_login.py)）；搶到票後 cookie 灌回同一視窗跳結帳頁。**啟用 proxy 時 Chrome 也走同一 proxy**（經 [proxy_bridge.py](tixcraftapi/proxy_bridge.py) 起 localhost forwarder 補 auth header），全程同 IP 避免風控。proxy_url 為空時 Chrome 直連、bridge 不啟動，不影響本機效能
+- **CliProxy 的節點（`CLIPROXY_HOST`）和出口地區（`CLIPROXY_REGION`）是兩件事，一定要配對**。壞掉的方式是「照常會動、只是慢一倍」，沒有錯誤訊息。2026-08-07 從 Oracle Ashburn 打拓元實測（暖 p50）：直連 69ms / `us2`+US **281ms** / `sg2`+TW 530ms / `us2`+TW **561ms**（最糟）。到節點本身 us2 只有 1.1ms、sg2 要 208ms —— 差的就是那趟太平洋。`proxy_pool.acquire()` 現在會比對前綴、不一致就出聲。**住宅代理有無法消除的成本**：節點再近，流量仍要繞到某個美國家庭寬頻再打回來，那兩段消費級線路就是 200ms 起跳，所以只在「真的需要每個 instance 不同 IP」時才開，不要當預設
 - `create_profile.py --name 帳號名` 建立 `chrome_profiles/<平台>/<帳號名>/` 專用 profile（一帳號一資料夾，cookie jar 隔離）。**預設每執行一次就換一個 proxy 出口 IP**（sid 加亂數尾巴），卡 reCAPTCHA 就原指令重跑換 IP；`--fixed-ip` 才固定同 name 同 IP。啟動時會打 ipify 印出本次出口 IP。**坑（2026-07-26 實測）：CliProxy 的 sid 只能英數，不能有連字號** —— 帳號字串 `-region-TW-sid-{sid}-t-90` 是用 `-` 分隔 key/value，sid 裡有 `-` 會靜默退回帳號預設 IP（看起來換了其實沒換，舊的 `p-{name}` 就是這樣壞的）。**坑（2026-07 實測）**：有帶 proxy 時先開平台首頁（`PLATFORM_HOME`）暖機、別直衝登入頁——剛換的 proxy IP 直攻 FB/Google OAuth 容易卡 reCAPTCHA（是 proxy IP 風評問題非 bot 偵測，暖機能降低但不保證，本質是對方風控）
 
 ## Config 串接規則（非常重要）
