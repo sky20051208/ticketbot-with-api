@@ -242,7 +242,11 @@ EOF
 
 # x11vnc + noVNC：需要「用眼睛看」時（換帳號重登、檢查結帳頁）從瀏覽器連 :6080。
 # 只 bind localhost，一律走 SSH 通道進來，不對外開埠。
-sudo apt-get install -y -qq x11vnc novnc websockify openbox tint2 zenity thunar
+# xfce4-terminal 不是可有可無的：tint2 啟動鈕、openbox 右鍵選單、以及 new-profile.sh
+# 最後那個 exec 全都叫它。漏裝的話「建立 Chrome Profile」會走完兩個 zenity 對話框，
+# 然後 exec 失敗、畫面上什麼都不會發生（東京機實際踩到）。
+sudo apt-get install -y -qq x11vnc novnc websockify openbox tint2 zenity thunar \
+    xfce4-terminal
 # 視窗管理器：Xvfb 只負責畫，標題列 / 最小化 / 關閉鈕 / 拖曳縮放全是 WM 的事。
 # 沒有 WM 的話遠端看到的 Chrome 是一塊沒有邊框、也動不了的畫面。openbox 約 2MB。
 # 但 openbox 只有 WM 沒有工作列 —— 按了最小化的視窗會直接消失，而且沒有任何入口

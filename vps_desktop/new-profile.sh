@@ -18,6 +18,15 @@ die() { zenity --error --title="建立 Profile" --text="$1" --width=320 2>/dev/n
 [ -f "$REPO/create_profile.py" ] || die "找不到 $REPO/create_profile.py"
 [ -x "$VENV/bin/python" ]        || die "找不到 $VENV/bin/python"
 
+# create_profile.py 是互動式的（登入完要回終端機按 Enter），所以一定要有終端機。
+# 先挑好，不要等到最後才 exec —— 沒裝的話 exec 直接失敗，使用者只會看到兩個對話框
+# 閃過然後什麼都沒發生，完全不知道哪裡壞了（東京機實際踩到）。
+TERM_BIN=""
+for t in xfce4-terminal x-terminal-emulator xterm; do
+    command -v "$t" >/dev/null 2>&1 && { TERM_BIN="$t"; break; }
+done
+[ -n "$TERM_BIN" ] || die "找不到終端機程式。請先在機器上跑：\n\nsudo apt-get install -y xfce4-terminal"
+
 PLATFORM=$(zenity --list --title="建立 Chrome Profile" \
     --text="要登入哪個平台？\n（同一個帳號要在多個平台搶，就分別各建一次）" \
     --column="平台" --column="說明" \
@@ -55,4 +64,11 @@ rm -f "$RUN"
 EOF
 chmod +x "$RUN"
 
-exec xfce4-terminal --title="建立 Profile：$PLATFORM / $NAME" --geometry=100x30 -x "$RUN"
+TITLE="建立 Profile：$PLATFORM / $NAME"
+# xfce4-terminal 和 xterm 的旗標寫法不一樣（`--title=`/`-x` vs `-title`/`-e`），
+# 給錯的那組會讓終端機開起來卻不執行任何東西。
+if [ "$TERM_BIN" = "xfce4-terminal" ]; then
+    exec xfce4-terminal --title="$TITLE" --geometry=100x30 -x "$RUN"
+else
+    exec "$TERM_BIN" -title "$TITLE" -geometry 100x30 -e "$RUN"
+fi
