@@ -23,8 +23,17 @@ log "系統套件"
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     python3-pip python3-venv python3-dev build-essential \
-    xvfb xserver-xorg-video-dummy x11-xserver-utils \
-    chrony git curl unzip netcat-openbsd
+    xvfb xserver-xorg-video-dummy xserver-xorg-input-libinput x11-xserver-utils \
+    xinput chrony git curl unzip netcat-openbsd
+# xserver-xorg-input-libinput 是 Moonlight 滑鼠鍵盤能不能用的關鍵，別以為只有顯示要驅動。
+# 少了它 Xorg 對每個裝置都印「No input driver specified, ignoring this device」——
+# udev 明明認得 Sunshine 建的虛擬滑鼠，Xorg 卻沒有驅動可以綁，游標完全不動。
+#
+# 特別難查的是 **VNC 的滑鼠還是好的**：x11vnc 走 XTEST 直接注入 X，不經過 evdev；
+# Moonlight 走 uinput → evdev → X，斷的是中間那一段。所以「VNC 能動 = 輸入正常」
+# 這個推論在這裡不成立（東京機實際踩到）。美東那台沒出過這問題，推測是 base image
+# 裡本來就有這包（它有 lightdm，會把 xserver-xorg-input-* 一起拉進來），但沒實際查證過。
+# xinput 純診斷用，`DISPLAY=:99 xinput list` 看得到 Mouse/Keyboard passthrough 就對了。
 
 log "swap ${SWAP_GB}G（寫進 fstab，重開機不會消失）"
 # 上一台機器就是栽在這：fallocate 建的 swap 沒進 fstab，重開機後 Chrome 直接 OOM
