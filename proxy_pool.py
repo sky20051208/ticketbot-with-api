@@ -8,10 +8,38 @@ VALIDATE_URL = "https://tixcraft.com/"
 IP_ECHO_URL = "https://api.ipify.org"
 
 
+def cliproxy_region() -> str:
+    """出口住宅 IP 要哪一國。跟 CLIPROXY_HOST（節點）是**兩件獨立的事**，必須配對。
+
+    舊的 config.py 把地區寫死在 CLIPROXY_USERNAME_TEMPLATE 裡（`-region-TW-`），
+    所以這裡預設 TW、且 template 沒有 `{region}` 佔位符時 format 會直接忽略 ——
+    舊設定檔不用改也能跑。
+    """
+    return getattr(config, "CLIPROXY_REGION", "") or "TW"
+
+
 def _build_cliproxy_url() -> str:
     """組 CliProxy 認證 URL；sid 用 ACC_ID 確保多開時每個 instance 拿到不同出口 IP。"""
-    user = config.CLIPROXY_USERNAME_TEMPLATE.format(acc_id=config.ACC_ID)
+    user = config.CLIPROXY_USERNAME_TEMPLATE.format(
+        acc_id=config.ACC_ID, region=cliproxy_region())
     return f"http://{user}:{config.CLIPROXY_PASSWORD}@{config.CLIPROXY_HOST}:{config.CLIPROXY_PORT}"
+
+
+def _warn_if_node_region_mismatch() -> None:
+    """節點和出口地區不搭時出聲。
+
+    這兩個值分開設定就有改一半的風險，而最糟的組合（美國節點 + 台灣住宅 IP）
+    實測比原本的組合還慢：2026-08-07 從 Oracle Ashburn 打拓元，
+      us2 + US = 281ms、sg2 + TW = 530ms、**us2 + TW = 561ms**。
+    壞掉的方式是「還是能跑、只是慢一倍」，不講就永遠不會發現。
+    """
+    host = (config.CLIPROXY_HOST or "").lower()
+    region = cliproxy_region().upper()
+    node = "US" if host.startswith("us") else ("TW" if host.startswith("tw") else
+                                               "SG" if host.startswith("sg") else "")
+    if node and node != region:
+        print(f"[PROXY] ⚠ 節點是 {node}（{config.CLIPROXY_HOST}）但出口地區設 {region} —— "
+              f"流量會多繞一趟，確認 CLIPROXY_HOST 和 CLIPROXY_REGION 是不是該一致")
 
 
 VALIDATE_TIMEOUT = 12  # sg2 新加坡節點正常 < 3s 完成；留 buffer 防偶發抖動
@@ -46,8 +74,10 @@ def acquire() -> str:
     if not config.ENABLE_PROXY_POOL:
         return ""
 
+    _warn_if_node_region_mismatch()
     proxy_url = _build_cliproxy_url()
-    print(f"[PROXY] CliProxy 啟用 (acc={config.ACC_ID})")
+    print(f"[PROXY] CliProxy 啟用 (acc={config.ACC_ID}, "
+          f"{config.CLIPROXY_HOST} region={cliproxy_region()})")
     for i in range(1, MAX_VALIDATE_TRIES + 1):
         if _validate(proxy_url):
             config.CURRENT_PROXY = proxy_url
