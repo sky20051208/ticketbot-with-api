@@ -64,7 +64,6 @@ import subprocess
 import requests
 
 import config
-import proxy_pool
 from browser_login import setup_proxy_bridge, chrome_launch_flags
 
 PROFILES_DIR = os.path.join(config.BASE_DIR, "chrome_profiles")
@@ -135,8 +134,7 @@ def _auto_proxy_url(sid: str) -> str:
     risk 等級可接受。要完全一致請手動 --proxy 指定。"""
     if not config.ENABLE_PROXY_POOL:
         return ""
-    user = config.CLIPROXY_USERNAME_TEMPLATE.format(
-        acc_id=sid, region=proxy_pool.cliproxy_region())
+    user = config.CLIPROXY_USERNAME_TEMPLATE.format(acc_id=sid)
     return f"http://{user}:{config.CLIPROXY_PASSWORD}@{config.CLIPROXY_HOST}:{config.CLIPROXY_PORT}"
 
 

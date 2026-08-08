@@ -66,25 +66,11 @@ LINE_WORKER_URL = ""             # 部署後填，例如 "https://linebot-ticket
 LINE_WORKER_ADMIN_KEY = ""       # 建議用 `python -c "import secrets; print(secrets.token_urlsafe(32))"` 生一組
 
 # --- Proxy Pool (CliProxy 住宅 IP) ---
-# **節點（CLIPROXY_HOST）和出口地區（CLIPROXY_REGION）是兩件獨立的事，要一起設。**
-# 節點決定你的封包先跑去哪，地區決定最後從哪一國的住宅寬頻出去。
-#
-# 2026-08-07 從 Oracle Ashburn（拓元專用機）實測打 tixcraft.com，暖連線 p50：
-#     直連（不走 proxy）                    69ms   ← 沒有 IP 隔離
-#     us2 + region US                      281ms  （抽 6 顆：249~372ms）
-#     sg2 + region TW                      530ms
-#     us2 + region TW                      561ms  ← 最糟，節點跟地區沒配對
-# 從 Ashburn 到節點本身：us2 = 1.1ms、sg2 = 208ms（差的就是那趟太平洋）。
-#
-# 住宅代理有**無法消除的成本**：節點再近，流量還是要繞到某個美國家庭寬頻再打回來，
-# 那兩段消費級線路就是 200ms 起跳。所以只在「真的需要每個 instance 不同 IP」時才開。
 ENABLE_PROXY_POOL = False                        # 是否啟用 CliProxy（每個 instance 獨立 IP）
-CLIPROXY_HOST = ""                               # 例 "us2.cliproxy.io"（美東機）/ "sg2.cliproxy.io"（台灣）
-CLIPROXY_REGION = "TW"                           # 出口住宅 IP 的國別，要跟節點配對
+CLIPROXY_HOST = ""                               # 例 "sg2.cliproxy.io"
 CLIPROXY_PORT = 3010
 # {acc_id} 會被 ACC_ID 替換 → 每個 instance 不同 sid → 不同出口 IP
-# {region} 會被 CLIPROXY_REGION 替換（沒寫這個佔位符也能跑，地區就吃字串裡寫死的那個）
-CLIPROXY_USERNAME_TEMPLATE = ""                  # 例 "your_account-region-{region}-sid-acc{acc_id}-t-90"
+CLIPROXY_USERNAME_TEMPLATE = ""                  # 例 "your_account-region-TW-sid-acc{acc_id}-t-90"
 CLIPROXY_PASSWORD = ""
 CURRENT_PROXY = ""                               # 執行期由 proxy_pool.acquire() 寫入
 
