@@ -24,6 +24,9 @@ from urllib.parse import urlparse
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+
+import config
 
 from tixcraftapi.bind_proxy import BindingProxy
 from tixcraftapi.proxy_bridge import LocalProxyBridge
@@ -212,6 +215,31 @@ def _verify_tixcraft_logged_in(driver) -> bool:
         return False
 
 
+# eps 擋人時畫面上會出現的字（英文版 / 中文版都收）
+_BLOCK_MARKS = ("Your Browsing Activity Has Been Paused",
+                "We've detected unusual behavior",
+                "Sorry, you have been blocked")
+
+
+def _challenge_blocked(driver) -> bool:
+    """畫面上**看得到**封鎖訊息嗎？
+
+    要用 `body.text`（渲染後看得到的文字），**不能拿 curl_cffi 收到的原始 HTML 比對**。
+    2026-08-07 實測：那串封鎖文字本來就寫在 eps 挑戰頁的 HTML 裡，連直連
+    （確定沒被擋、Chrome 開得起來）的回應都有 —— 它只在挑戰失敗時才被顯示出來。
+    挑戰頁和封鎖頁**同樣是 HTTP 401、body 長度只差幾 byte**，所以封包那層根本分不出來，
+    只有跑完 JS 的瀏覽器知道結果（挑戰過了 DOM 就被換成真正的頁面）。
+
+    這也是為什麼 `proxy_pool._validate` 擋不住這種情況：它用 curl_cffi 看狀態碼，
+    而狀態碼在兩種情況下都是 401。
+    """
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text
+    except Exception:
+        return False
+    return any(m in body for m in _BLOCK_MARKS)
+
+
 def wait_for_login(driver, timeout: int = 600, start_url: str = "") -> bool:
     """跳到登入起始頁，每次都走一遍登入流程；輪詢直到 URL 回到 tixcraft 主站。
 
@@ -248,6 +276,8 @@ def wait_for_login(driver, timeout: int = 600, start_url: str = "") -> bool:
 
     deadline = time.monotonic() + timeout
     last_url = ""
+    blocked_reported = False
+    proxied = bool(getattr(config, "CURRENT_PROXY", ""))
     locked_handle: str | None = None  # 一旦切到 tixcraft 分頁就鎖定，後續不再亂跳
     while time.monotonic() < deadline:
         # livenation 的「立即購票」是 target="_blank"，點下去 tixcraft 會開在新分頁。
@@ -291,6 +321,14 @@ def wait_for_login(driver, timeout: int = 600, start_url: str = "") -> bool:
         if on_tixcraft and off_login_path and _verify_tixcraft_logged_in(driver):
             print(f"[LOGIN] 登入完成: {cur}")
             return True
+
+        if on_tixcraft and not blocked_reported and _challenge_blocked(driver):
+            blocked_reported = True   # 只講一次，不要每秒洗版
+            print("[LOGIN] ✗ 被 eps 擋下（畫面顯示 Your Browsing Activity Has Been Paused）")
+            print(f"[LOGIN]   目前出口 IP 沒通過瀏覽器挑戰。"
+                  f"{'走 proxy 的話重開這張卡片會換一顆 IP 再試' if proxied else ''}")
+            print("[LOGIN]   注意：這**不是** curl_cffi 那層看得出來的 —— "
+                  "挑戰頁和封鎖頁都是 HTTP 401、HTML 也一模一樣，差別只在瀏覽器跑完 JS 之後")
 
         if cur != last_url:
             hint = ""
