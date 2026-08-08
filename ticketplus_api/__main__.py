@@ -28,7 +28,7 @@ from timeWatcher import TimeWatcher
 from tixcraftapi import alerts
 from LineBot import line_push
 
-from ticketplus_api import catalog, parsing, reserve as tp_reserve
+from ticketplus_api import catalog, crypto, parsing, reserve as tp_reserve
 from ticketplus_api.session import (build_session, describe_token, extract_token,
                                     make_keepalive, token_remaining, warmup_session)
 from ticketplus_api import browser_session as tp_browser
@@ -203,30 +203,51 @@ def build_plan(session, event_id: str) -> dict | None:
     order = " > ".join(parsing.target_label(a, p) for a, p in targets)
     print(f"[PLAN] {kind}活動，優先序: {order}")
 
-    _warn_if_serial_required(session, targets)
+    _warn_if_serial_required(session, session_id, targets)
     return {"session": sess, "session_id": session_id, "targets": targets,
             "amount": int(config.TICKET_AMOUNT or 1)}
 
 
-def _warn_if_serial_required(session, targets):
-    """開賣前先查一次票況，看候選票種有沒有綁「專屬代碼」（會員優先購／問答題）。
+def _warn_if_serial_required(session, session_id: str, targets):
+    """開賣前檢查這場要不要「專屬代碼」（會員碼 / 加購序號），要而沒填就大聲喊。
 
-    判斷依據跟前端一致：票種的 `serialKey` 非空 → 送單時必須帶 serialNumber，
-    沒帶或填錯官方回 errCode 124/125。與其等 T-0 被打回，不如現在就講。
+    **兩個信號都要看，只看一個會漏**（2026-08-08 用 NCT WISH 那場驗證出來的）：
+      場次層 `transactionValidType`  —— 主辦一設定就有，**最早出現**
+      票種層 `serialKey`             —— 常常晚一步才補上（NCT WISH 開賣前 2 天，
+                                        場次層已是 sk00000466，71 個票種卻全是 null）
+
+    前端要兩個都成立才渲染輸入框，但對 bot 來說「其中一個有」就該提醒 —— 寧可多喊一次，
+    也不要在 T-0 才被 errCode 124 打回（實測不填不會馬上擋，會讓你白排完一輪隊）。
     """
+    reasons = []
+
+    info = catalog.get_session_info(session, crypto.decrypt_id(session_id))
+    if info.get("transactionValidType"):
+        reasons.append(f"場次設定 transactionValidType={info['transactionValidType']}")
+
     infos, _ = catalog.get_infos(session, [p["productId"] for _, p in targets], log=False)
-    need = [p for _, p in targets
-            if (infos.get("product") and
-                any(i.get("id") == p["productId"] and i.get("serialKey")
-                    for i in infos["product"]))]
-    if not need:
+    named = [p for _, p in targets
+             if any(i.get("id") == p["productId"] and i.get("serialKey")
+                    for i in (infos.get("product") or []))]
+    if named:
+        reasons.append("票種綁序號：" + "、".join(str(p.get("name")) for p in named))
+
+    if not reasons:
         return
-    names = "、".join(str(p.get("name")) for p in need)
+    desc = info.get("SNDescription") or {}
+    hint = ""
+    for val in desc.values() if isinstance(desc, dict) else []:
+        tw = (val or {}).get("tw") if isinstance(val, dict) else None
+        if tw and tw.get("title"):
+            hint = f"（官方說明：{tw['title']}）"
+            break
+
+    print(f"[PLAN] ⚠ 這場需要專屬代碼{hint} —— {' / '.join(reasons)}")
     if config.PRESALE_CODE:
-        print(f"[PLAN] ⚠ 這場需要專屬代碼（{names}），將帶 PRESALE_CODE 送出")
+        print(f"[PLAN] ⚠ 將帶 PRESALE_CODE 送出（填錯會被 errCode 124 中止）")
     else:
-        print(f"[PLAN] ⚠ 這場需要專屬代碼（{names}），但 PRESALE_CODE 是空的 —— "
-              f"送單會被官方以 errCode 124 打回，請先填會員碼／問答題答案")
+        print("[PLAN] ⚠ 但 PRESALE_CODE 是空的！不填不會馬上被擋，"
+              "而是排完隊才失敗 —— 請先去卡片填上會員碼／序號")
 
 
 async def _refresh_token_if_stale(token: str, tab) -> str:

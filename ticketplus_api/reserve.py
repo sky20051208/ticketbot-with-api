@@ -221,37 +221,48 @@ def _to_epoch(value) -> float | None:
 
 
 def summarize(raw: dict) -> list[str]:
-    """從 reserve 回應擠出對人有用的資訊（結帳期限、座位）。抓不到就略過該行，
-    **不要因為欄位名猜錯就炸掉** —— 票已經到手了，摘要只是加分。"""
+    """從 reserve 回應擠出對人有用的資訊（金額、結帳期限、座位）。抓不到就略過該行，
+    **不要因為欄位名猜錯就炸掉** —— 票已經到手了，摘要只是加分。
+
+    欄位名是 2026-08-08 拿真實 reserve 回應對過的：
+      頂層     errCode/errMsg/errDetail, orderId, total, remainSecond, welfareFee,
+               finalizedSeats, hash, products[]
+      products count, productId, ticketAreaName, singleTicketPrice, status,
+               expiryTimestamp, createdAt, orderId, idx, hash, userId, userType, seats[]
+      seats    ticketAreaId, ticketAreaName, area, row, column, seatId, index, nextIndex
+    """
     lines = []
     products = raw.get("products") or []
 
+    if raw.get("total") is not None:
+        lines.append(f"金額 ${raw['total']}")
+
+    # remainSecond 是伺服器直接給的剩餘秒數，比自己拿 expiryTimestamp 減本機時鐘準
+    left = raw.get("remainSecond")
     expiry = _to_epoch(products[0].get("expiryTimestamp")) if products else None
-    if expiry:
+    if left is None and expiry:
         left = expiry - time.time()
-        lines.append(f"結帳期限 {time.strftime('%H:%M:%S', time.localtime(expiry))}"
-                     f"（剩 {int(left // 60)} 分 {int(left % 60)} 秒）")
+    if left is not None:
+        at = time.strftime("%H:%M:%S", time.localtime(expiry)) if expiry else "?"
+        lines.append(f"結帳期限 {at}（剩 {int(left // 60)} 分 {int(left % 60)} 秒）")
 
     seats = [s for p in products for s in (p.get("seats") or [])]
     if seats:
-        # 2026-07-29 實測輸出過 "a000008654 工作表1 1 23 VVIP" —— ticketAreaId 因為含
-        # "area" 被誤撿進來，且座位圖是從 Excel 匯的所以有 "工作表1" 這種雜訊欄位。
-        # 對策：先砍掉一切 id 欄位，再照「區 → 排 → 號」的偏好順序組標籤。
         lines.append(f"座位 {' / '.join(_seat_label(s) for s in seats)}")
-        lines.append(f"（座位欄位: {sorted(seats[0].keys())}）")
     return lines
 
 
-_SEAT_KEY_ORDER = ("ticketareaname", "areaname", "zonename",
-                   "rowname", "row", "rowno",
-                   "seatname", "seatno", "seatnumber", "seat", "number")
-
-
 def _seat_label(seat: dict) -> str:
-    """座位 dict → 一句人看得懂的標籤。欄位名沒有官方文件，撿不到就整包壓字串。"""
-    usable = {k.lower(): v for k, v in seat.items()
-              if isinstance(v, (str, int)) and not k.lower().endswith("id")}
-    picked = [str(usable[k]) for k in _SEAT_KEY_ORDER if k in usable]
-    if picked:
-        return " ".join(picked)
-    return " ".join(str(v) for v in usable.values()) or str(seat)
+    """座位 dict → 「GA 17排25號」。
+
+    欄位名是實測對過的：`ticketAreaName`(票區) / `row`(排) / `column`(座位號)。
+    刻意不用 `area` —— 那是主辦匯座位圖時留下的內部名稱，實測看過整個票區叫「工作表1」
+    （Excel 分頁名），印給客人看只會造成困惑。
+    """
+    area = seat.get("ticketAreaName") or seat.get("area") or ""
+    row, col = seat.get("row"), seat.get("column")
+    if row is not None and col is not None:
+        return f"{area} {row}排{col}號".strip()
+    usable = [str(v) for k, v in seat.items()
+              if isinstance(v, (str, int)) and not k.lower().endswith("id")]
+    return " ".join(usable) or str(seat)

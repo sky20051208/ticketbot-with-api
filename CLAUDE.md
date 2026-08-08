@@ -99,12 +99,36 @@ DevTools → Application → Cookies → `user`。`extract_token()` 吃整串 co
   **且** `session.transactionValidType` 非空（它的值就是那個 serialKey，例如 `sk00000433`）。
   說明文字在 `session.SNDescription[serialKey][語系]`。填錯回 **124**、已被用過回 **125**，
   兩者都標 fatal（重試無用）；`build_plan` 會在開賣前先查 `serialKey` 預警。
-  **實測結論（2026-08 掃過全站 90 場活動 / 1746 個票種）：這機制實務上是「加購序號」不是
-  「會員優先購搶門票」** —— 只有 6 場在用，全部是 VIP PASS / 手燈 / 特典這類周邊加購
-  （文案就寫「加購序號」「預購序號」，價格 0/1/900/1800），序號是用來證明「你是有票的人」
-  防黃牛掃周邊的。**搶門票沒有需要打會員碼的場次**，`PRESALE_CODE` 平常留空即可。
+  **掃站實測（2026-08-08，全站 95 場 / 155 場次 / 1778 票種）：13 個場次開了
+  `transactionValidType`，其中 12 個是周邊加購**（VIP PASS / 手燈 / 特典，價格 0~1800，
+  文案寫「加購序號」「預購序號」），序號是用來證明「你是有票的人」防黃牛掃周邊的。
+  **但第 13 個是真的門票**：NCT WISH 2ND ANNIVERSARY FANMEETING（`s000002171`，
+  `sk00000466`，全票 $6200，2026-08-10 11:00 開賣）—— 所以**「搶門票不會用到會員碼」
+  已經不成立**，遇到新活動一律讓 bot 自己檢查，不要憑印象假設。
+  掃描方法（要重查時照跑）：`mainEvents.json` → 每場 `sessions.json` → `crypto.decrypt_id`
+  轉明文 → 分批打 `/get?sessionId=…` 看 `transactionValidType`。全程不需要登入。
   另外前端有「問答題模式」（票種帶 `hint` → 欄位變答案欄）但 1746 個票種裡 `hint` 全是空的，
   等於沒人在用，別為它花時間
+- **序號驗證的實測行為**（2026-08-08 拿真帳號對三種情況打過）：
+  1. 有 serialKey 的票種 + 亂填序號 → **enqueue 就擋**（不是 reserve），
+     `errCode 124 / errMsg "Serial number not found"`，RTT **2246ms**（一般 66ms，
+     它真的去查了序號庫）
+  2. 有 serialKey 的票種 + **完全不帶** serialNumber → **不擋**，照樣回 137 進排隊 ——
+     驗證只在「有給」的時候才做，所以沒填會白排完一輪隊才失敗，`build_plan` 的開賣前預警
+     就是為了這個
+  3. 一般票種硬塞 serialNumber → **完全無視**，不報錯 ⇒ `PRESALE_CODE` 填了不該填的場次無害
+- **偵測要看兩個信號，只看票種層會漏**（2026-08-08 用 NCT WISH 抓到）：場次層
+  `transactionValidType` 主辦一設定就有，票種層 `serialKey` 常常晚好幾天才補上 ——
+  那場開賣前 2 天場次層已是 `sk00000466`、71 個票種的 `serialKey` 卻全是 `null`，
+  `SNDescription` 也還沒填。`_warn_if_serial_required()` 因此兩個都查（`catalog.get_session_info()`
+  查場次層，要傳**明文** sessionId，用 `crypto.decrypt_id()` 轉）
+- **reserve 成功回應的欄位**（實測，`summarize()` 靠這些組摘要）：
+  頂層 `orderId` / `total` / **`remainSecond`**（伺服器直接給剩餘秒數，比自己拿
+  expiryTimestamp 減本機時鐘準）/ `welfareFee` / `finalizedSeats` / `hash` / `products[]`；
+  `products[]` 有 `ticketAreaName` / `singleTicketPrice` / `expiryTimestamp` / `status` / `seats[]`；
+  `seats[]` 是 `ticketAreaName` / `row` / `column` / `seatId` / `area`。
+  **座位標籤用 `ticketAreaName`+`row`+`column`，不要用 `area`** —— 那是主辦匯座位圖留下的
+  內部名稱，實測看過整區叫「工作表1」（Excel 分頁名）
 - **圖形驗證碼**：errCode **135**（驗證失敗）/ **136**（已過期）代表這場有 captcha（`api/captcha/api/v1/generate`，另有 reCAPTCHA sitekey 在 bundle 裡）。本 bot **未實作**，遇到只能中止 —— 目前實測的活動都沒觸發
 - 送單成功後**直接導結帳確認頁**（`browser_session.checkout_url`）：有劃位 → `/confirmSeat/<加密eventId>/<加密sessionId>`（ConfirmSt），無劃位 → `/confirm/…`（Order2），跟前端 `nextStep` 自己的路由判斷一致。這兩頁 `init()` 會先打 `getUserCurrentReservedOrder`，有保留中的訂單就 `setReservedData()` 純從伺服器重建（**不依賴搶票當下的前端狀態**），沒訂單才自己退回 Order1 —— 所以直接跳是安全的，不用先繞 Order1
 

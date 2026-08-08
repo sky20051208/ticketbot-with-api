@@ -37,6 +37,24 @@ def _get_json(session: cf_requests.Session, url: str, timeout: float = 10.0) -> 
         return {}
 
 
+def get_session_info(session: cf_requests.Session, session_id: str) -> dict:
+    """查單一場次的即時設定。session_id 要**明文**（s000002171），加密的先用
+    `crypto.decrypt_id()` 轉。
+
+    開賣前檢查用（不在熱路徑上，所以不做 `_fresh_params` 那套繞快取）。要看的是
+    `transactionValidType` —— 它非空就代表這個場次開了「專屬代碼」驗證，而且**它比票種的
+    `serialKey` 更早出現**：2026-08-08 看 NCT WISH（s000002171）時場次層已經是
+    `sk00000466`，71 個票種的 serialKey 卻還全是 null（主辦設定還沒補完）。
+    只看 serialKey 會漏掉這種還沒設定完的場次。
+    """
+    data = _get_json(session, f"{CONFIG_API}/get?sessionId={session_id}&")
+    if data.get("errCode") not in ("00", None):
+        print(f"[INFO] 場次設定查詢 errCode={data.get('errCode')}")
+        return {}
+    sessions = (data.get("result") or {}).get("session") or []
+    return sessions[0] if sessions else {}
+
+
 def fetch_catalog(session: cf_requests.Session, event_id: str) -> dict:
     """抓活動的靜態目錄。event_id 用**網址上那串加密 id**。
     回 {"sessions": [...], "ticketAreas": [...], "products": [...]}，抓不到的鍵給空 list。"""
