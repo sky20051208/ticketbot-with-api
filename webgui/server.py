@@ -228,6 +228,32 @@ async def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+DEFAULT_BIND_OPTION = "(預設出口)"
+
+
+@app.get("/api/local_ips")
+async def list_local_ips():
+    """這台機器上可以拿來當出口的次要私有 IP（多開時每張卡片綁一顆）。
+
+    直接讀網卡而不是讀設定檔 —— IP 是 `rotate_ips.py --sync-os` 在開機時跟 OCI
+    對帳掛上去的，在 OCI Console 增減之後這裡自動反映，不用再改任何設定。
+    非 Linux（本機開發）或沒有次要 IP 時只回「(預設出口)」，卡片就跟以前一樣走主 IP。
+    """
+    result = [DEFAULT_BIND_OPTION]
+    try:
+        out = subprocess.run(["ip", "-4", "addr", "show"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return result
+    for line in out.splitlines():
+        line = line.strip()
+        # `inet 10.0.0.40/24 scope global secondary ens3` —— 只收 secondary，
+        # 主 IP 不能拿來綁（那是 SSH / 管理走的，而且它配的是 ephemeral public IP）
+        if line.startswith("inet ") and "secondary" in line:
+            result.append(line.split()[1].split("/")[0])
+    return result
+
+
 @app.get("/api/chrome_profiles")
 async def list_chrome_profiles(platform: str = ""):
     """回某平台的 chrome profile 清單（含「(手貼COOKIE)」）。

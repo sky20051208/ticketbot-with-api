@@ -6,6 +6,14 @@ const AREA_MODES = ["關鍵字優先", "由上而下", "由下而上", "隨機"]
 const MANUAL_COOKIE = "(手貼COOKIE)";
 let CUSTOMERS = [];  // [{name, user_id, concert}]，由 /api/customers 填（proxy 到 Cloudflare Worker + D1）
 let CHROME_PROFILES_BY_PLATFORM = {};  // {平台: [profile名...]}，由 /api/chrome_profiles 填
+// 這台機器可用的出口 IP，由 /api/local_ips 填（讀網卡，所以 OCI 上增減會自動反映）
+const DEFAULT_BIND_OPTION = "(預設出口)";
+let LOCAL_IPS = [DEFAULT_BIND_OPTION];
+
+function _bindIpValue(card) {
+  const v = card.querySelector(".f-bindip").value;
+  return v === DEFAULT_BIND_OPTION ? "" : v;   // 空字串 = 不綁，走主 IP
+}
 function profilesFor(platform) {
   const list = CHROME_PROFILES_BY_PLATFORM[platform];
   return (list && list.length) ? list : [MANUAL_COOKIE];
@@ -74,6 +82,11 @@ async function refresh() {
     CHROME_PROFILES_BY_PLATFORM = {};  // server 還沒重啟也讓 grid 照常 render
   }
   try {
+    LOCAL_IPS = await api("GET", "/api/local_ips");
+  } catch (_) {
+    LOCAL_IPS = [DEFAULT_BIND_OPTION];  // 舊版 server 沒這個端點也不要炸掉整頁
+  }
+  try {
     CUSTOMERS = await api("GET", "/api/customers");
   } catch (_) {
     CUSTOMERS = [];
@@ -139,7 +152,11 @@ function renderCard(item) {
   bindText  (card, ".f-watchurl", cfg.TIME_WATCH_URL);
   bindCheck (card, ".f-timer",    cfg.ENABLE_TIME_WATCHER);
   bindCheck (card, ".f-proxy",    cfg.ENABLE_PROXY_POOL);
-  bindText  (card, ".f-bindip",   cfg.LOCAL_BIND_IP);
+  // 出口 IP：值存空字串代表「走主 IP」，但下拉不能有空白選項，所以用一個顯示用的
+  // 標籤代表它（readCardConfig 再轉回空字串）。機器上沒掛次要 IP 時就只有這一個選項。
+  bindSelect(card, ".f-bindip", LOCAL_IPS,
+             cfg.LOCAL_BIND_IP && LOCAL_IPS.includes(cfg.LOCAL_BIND_IP)
+               ? cfg.LOCAL_BIND_IP : DEFAULT_BIND_OPTION);
   const _custSel = card.querySelector(".f-lineuser");
   fillCustomerSelect(_custSel, cfg.LINE_USER_ID);
   _custSel.addEventListener("change", () => scheduleSave(card));
@@ -236,7 +253,7 @@ function readCardConfig(card) {
     TIME_WATCH_URL:          card.querySelector(".f-watchurl").value,
     ENABLE_TIME_WATCHER:     card.querySelector(".f-timer").checked,
     ENABLE_PROXY_POOL:       card.querySelector(".f-proxy").checked,
-    LOCAL_BIND_IP:           card.querySelector(".f-bindip").value.trim(),
+    LOCAL_BIND_IP:           _bindIpValue(card),
     LINE_USER_ID:            card.querySelector(".f-lineuser").value,
     TICKET_FEE:              card.querySelector(".f-fee").value,
     COOKIE:                  card.querySelector(".f-cookie").value,
