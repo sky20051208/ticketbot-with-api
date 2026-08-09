@@ -279,6 +279,125 @@ def state_only() -> None:
     print(inst["State"]["Name"] if inst else "none")
 
 
+# 多開時每個 instance 要有自己的出口 IP。跟 Oracle 那台（setup_multi_ip.py）同樣的
+# 架構，但 AWS 有兩個關鍵差異：
+#   1. **次要私有 IP 不會自動拿到公網 IP**，一定要配 Elastic IP 綁上去
+#   2. **公網 IPv4 要錢**：ap-northeast-1 每顆 $0.005/hr ≈ $3.65/月，而且
+#      In-use 和 Idle 同價 —— **關機也照收**。Oracle 的 reserved public IP 是免費的
+# 帳號預設的 Elastic IP 配額是 5（`vpc-max-elastic-ips`），要更多得去 Service Quotas 申請。
+MULTI_IP_TAG = "ticketplus-egress"
+
+
+def _instance_eni(inst: dict) -> dict:
+    return inst["NetworkInterfaces"][0]
+
+
+def multi_ip() -> None:
+    """備妥 N 顆次要私有 IP，每顆各綁一顆 Elastic IP（預設 5 = 配額上限）。
+
+    冪等：已經有的不動，只補不足的。跑第二次不會重複配。
+    """
+    count = 5
+    args = [a for a in sys.argv[2:] if not a.startswith("-")]
+    if args:
+        count = int(args[0])
+
+    inst = find_instance()
+    if not inst or inst["State"]["Name"] != "running":
+        raise SystemExit("機器要開著才能配 IP —— 先 python aws_tokyo.py start")
+
+    c = ec2()
+    eni = _instance_eni(inst)
+    eni_id = eni["NetworkInterfaceId"]
+    privs = eni["PrivateIpAddresses"]
+    secondaries = [p for p in privs if not p["Primary"]]
+    print(f"目前次要私有 IP {len(secondaries)} 顆，目標 {count} 顆")
+
+    # 1. 補足次要私有 IP（AWS 會自己從子網挑）
+    need = count - len(secondaries)
+    if need > 0:
+        c.assign_private_ip_addresses(NetworkInterfaceId=eni_id,
+                                      SecondaryPrivateIpAddressCount=need)
+        print(f"  已加 {need} 顆次要私有 IP")
+        eni = _instance_eni(find_instance())
+        secondaries = [p for p in eni["PrivateIpAddresses"] if not p["Primary"]]
+
+    # 2. 每顆配一顆 Elastic IP。先撿已經配好但沒綁的，不夠才新配 —— 配額只有 5，
+    #    而且每顆閒置一樣要錢，不能亂長。
+    addrs = c.describe_addresses()["Addresses"]
+    spare = [a for a in addrs if not a.get("AssociationId")]
+    for p in secondaries[:count]:
+        ip = p["PrivateIpAddress"]
+        if p.get("Association", {}).get("PublicIp"):
+            print(f"  {ip:<16} 已有 {p['Association']['PublicIp']}")
+            continue
+        if spare:
+            a = spare.pop(0)
+            print(f"  {ip:<16} ← 重用閒置的 {a['PublicIp']}")
+        else:
+            try:
+                new = c.allocate_address(
+                    Domain="vpc",
+                    TagSpecifications=[{"ResourceType": "elastic-ip",
+                                        "Tags": [{"Key": "Name", "Value": MULTI_IP_TAG}]}])
+            except ClientError as e:
+                if "AddressLimitExceeded" in str(e):
+                    raise SystemExit(
+                        f"\nElastic IP 配額用完了（預設 5）。要更多的話到 AWS Console →\n"
+                        f"Service Quotas → EC2 → 'EC2-VPC Elastic IPs' 申請調高（免費）。")
+                raise
+            a = {"PublicIp": new["PublicIp"], "AllocationId": new["AllocationId"]}
+            print(f"  {ip:<16} ← 新配 {a['PublicIp']}")
+        c.associate_address(AllocationId=a["AllocationId"],
+                            NetworkInterfaceId=eni_id, PrivateIpAddress=ip)
+
+    _show_egress()
+    monthly = count * 0.005 * 730
+    print(f"\n費用：{count} 顆公網 IPv4 × $0.005/hr ≈ **${monthly:.2f}/月**")
+    print("      In-use 和 Idle 同價 —— **關機也照收**，不用了要 release 才會停。")
+    print("\n下一步：到機器上跑 `sudo python3 sync_aws_ips.py` 把 IP 掛進作業系統")
+
+
+def _show_egress() -> None:
+    inst = find_instance()
+    eni = _instance_eni(inst)
+    print(f"\n{'私有 IP':<16}{'角色':<12}公網 IP")
+    for p in sorted(eni["PrivateIpAddresses"], key=lambda x: not x["Primary"]):
+        pub = p.get("Association", {}).get("PublicIp", "-")
+        print(f"{p['PrivateIpAddress']:<16}{'primary' if p['Primary'] else 'secondary':<12}{pub}")
+
+
+def release_ips() -> None:
+    """把這台的次要 IP 和對應的 Elastic IP 全部收掉（停止計費）。"""
+    inst = find_instance()
+    if not inst:
+        raise SystemExit("找不到機器")
+    c = ec2()
+    eni = _instance_eni(inst)
+    secondaries = [p for p in eni["PrivateIpAddresses"] if not p["Primary"]]
+    if not secondaries:
+        print("沒有次要 IP 可以收")
+        return
+    print(f"要收掉 {len(secondaries)} 顆次要 IP 和它們的 Elastic IP（每月省 "
+          f"${len(secondaries) * 0.005 * 730:.2f}）")
+    if input("確定的話輸入 release：").strip() != "release":
+        print("取消")
+        return
+    addrs = {a.get("PrivateIpAddress"): a for a in c.describe_addresses()["Addresses"]}
+    for p in secondaries:
+        ip = p["PrivateIpAddress"]
+        a = addrs.get(ip)
+        if a and a.get("AssociationId"):
+            c.disassociate_address(AssociationId=a["AssociationId"])
+        if a:
+            c.release_address(AllocationId=a["AllocationId"])
+            print(f"  釋放 {a['PublicIp']}")
+    c.unassign_private_ip_addresses(
+        NetworkInterfaceId=eni["NetworkInterfaceId"],
+        PrivateIpAddresses=[p["PrivateIpAddress"] for p in secondaries])
+    print("  次要私有 IP 已移除")
+
+
 def terminate() -> None:
     inst = find_instance()
     if not inst:
@@ -294,7 +413,8 @@ def terminate() -> None:
 def main():
     actions = {"create": create, "start": start, "stop": stop, "status": status,
                "sync-ip": sync_ip, "resize": resize, "ip": ip_only,
-               "state": state_only, "terminate": terminate}
+               "state": state_only, "terminate": terminate,
+               "multi-ip": multi_ip, "release-ips": release_ips}
     if len(sys.argv) < 2 or sys.argv[1] not in actions:
         raise SystemExit(f"用法: python aws_tokyo.py [{' | '.join(actions)}]")
     try:

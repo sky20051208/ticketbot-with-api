@@ -19,9 +19,69 @@ import config
 import proxy_pool
 from ticketplus_api import BASE, CONFIG_API, USER_API
 
-_IMPERSONATE = "chrome142"
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
+# 多開時每個 instance 要長得不一樣。**只換 IP 不夠** —— 20~30 個客人的帳號如果
+# TLS 指紋、User-Agent、Sec-Ch-Ua 全部一模一樣，同一毫秒下單同一場活動，那本身就是
+# 比 IP 更強的關聯訊號（2026-08-09 檢查發現當時所有 instance 只有 token 不同）。
+#
+# 三個原則，做錯比不做更糟：
+#   1. **指紋和 header 必須內部一致**：TLS 說 Chrome 146、UA 卻寫 142、Sec-Ch-Ua 又寫
+#      別的版本 —— 這種矛盾組合比「大家都一樣」更容易被挑出來
+#   2. **同一個 ACC_ID 永遠拿同一組**：帳號的瀏覽器指紋每次執行都在變也是異常，
+#      所以用 ACC_ID 取模，不用亂數
+#   3. **`Sec-Ch-Ua` 只有 Chromium 送**：Firefox / Safari 根本沒有這組 header。
+#      用 safari 指紋卻照送 Sec-Ch-Ua 等於自己舉手，所以 header 要跟著家族換
+#
+# **只換 Chrome 版本沒有用**（2026-08-09 實測）：chrome136/142/145/146 的 JA4 完全相同
+# （`t13d1516h2_8daaf6152771_d8a2da3f94cd`），因為 Chrome 這幾版的 TLS ClientHello 沒變。
+# 要讓 TLS 層真的分開，必須跨瀏覽器家族。
+_PROFILES = [
+    # (impersonate, 家族, UA)
+    ("chrome146", "chromium",
+     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
+    ("firefox147", "firefox",
+     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"),
+    ("safari184", "safari",
+     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+     "(KHTML, like Gecko) Version/18.4 Safari/605.1.15"),
+    ("chrome145", "chromium",
+     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+     "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"),
+    ("firefox144", "firefox",
+     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:144.0) Gecko/20100101 Firefox/144.0"),
+    ("chrome131", "chromium",
+     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    ("safari260", "safari",
+     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+     "(KHTML, like Gecko) Version/26.0 Safari/605.1.15"),
+    ("chrome142", "chromium",
+     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+     "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
+]
+
+
+def browser_profile() -> tuple[str, str, str]:
+    """這個 instance 該用哪一組瀏覽器指紋。回 (impersonate, 家族, User-Agent)。
+
+    **每次都重讀 `config.ACC_ID`**，不要在 import 時算好 —— GUI 是用
+    `load_config_override()` 在啟動後才把 ACC_ID 蓋進來的。
+    """
+    return _PROFILES[int(config.ACC_ID or 0) % len(_PROFILES)]
+
+
+def _client_hints(family: str, ua: str) -> dict:
+    """Chromium 專屬的 Sec-Ch-* header。非 Chromium 回空 dict（它們不送這組）。"""
+    if family != "chromium":
+        return {}
+    import re
+    ver = re.search(r"Chrome/(\d+)", ua).group(1)
+    return {
+        "Sec-Ch-Ua": f'"Chromium";v="{ver}", "Google Chrome";v="{ver}", '
+                     f'"Not-A.Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"macOS"' if "Macintosh" in ua else '"Windows"',
+    }
 
 
 def parse_user_cookie(cookie_str: str) -> dict:
@@ -133,31 +193,34 @@ def refresh_access_token(session: cf_requests.Session, refresh_token: str) -> tu
 
 def build_session(token: str = "") -> cf_requests.Session:
     """建 session。token 只影響預設 header，隨時可以用 auth_headers() 覆蓋。"""
-    session = cf_requests.Session(impersonate=_IMPERSONATE)
+    imp, family, _ua = browser_profile()
+    session = cf_requests.Session(impersonate=imp)
     proxies = proxy_pool.as_dict(config.CURRENT_PROXY)
     if proxies:
         session.proxies = proxies
         print(f"[SESSION] 走代理: {proxy_pool.redact(config.CURRENT_PROXY)}")
-    print(f"[SESSION] impersonate={_IMPERSONATE} token={'有' if token else '無'}")
+    # 印出來才看得出多開時每個 instance 真的長不一樣
+    print(f"[SESSION] acc={config.ACC_ID} impersonate={imp}（{family}）"
+          f" token={'有' if token else '無'}")
     return session
 
 
 def build_headers(token: str = "") -> dict:
     """XHR header（TicketPlus 全部 API 都是 CORS XHR，不是頁面導覽）。"""
+    _imp, family, ua = browser_profile()
     headers = {
-        "User-Agent": _UA,
+        "User-Agent": ua,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         "Content-Type": "application/json",
         "Origin": BASE,
         "Referer": f"{BASE}/",
-        "Sec-Ch-Ua": '"Chromium";v="142", "Google Chrome";v="142", "Not-A.Brand";v="99"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
+        # Sec-Fetch-* 三個瀏覽器都送，Sec-Ch-Ua 只有 Chromium 送（見 _client_hints）
         "Sec-Fetch-Site": "same-site",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Dest": "empty",
     }
+    headers.update(_client_hints(family, ua))
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
