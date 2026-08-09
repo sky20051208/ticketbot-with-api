@@ -102,8 +102,30 @@ IS_OCI=no
 if [ "$(cat /sys/class/dmi/id/chassis_asset_tag 2>/dev/null)" = "OracleCloud.com" ]; then
     IS_OCI=yes
 fi
-if [ "$IS_OCI" != "yes" ]; then
-    echo "  （不是 OCI 機器，跳過 —— AWS 的公網 IP 由 aws_tokyo.py 管）"
+if [ "$IS_OCI" != "yes" ] && [ -f "$REPO_DIR/sync_aws_ips.py" ]; then
+    # AWS 也一樣：EC2 只把 IP 配給網卡，OS 不會自己掛，而 `ip addr add` 重開機就沒了。
+    # 資料來源是 IMDSv2，機器上不用放金鑰。**次要私有 IP 要另外綁 Elastic IP 才有
+    # 公網出口**（在自己電腦上跑 `python aws_tokyo.py multi-ip`）。
+    # 用系統 python3 不是 venv —— 這支只用標準函式庫，而且要 root 跑。
+    sudo tee /etc/systemd/system/aws-secondary-ips.service > /dev/null <<EOF
+[Unit]
+Description=Attach EC2 secondary private IPs to the NIC
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 $REPO_DIR/sync_aws_ips.py
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now aws-secondary-ips.service || true
+    systemctl is-active aws-secondary-ips.service || true
+elif [ "$IS_OCI" != "yes" ]; then
+    echo "  （不是 OCI 機器、也找不到 sync_aws_ips.py，跳過）"
 elif [ -f "$HOME/rotate_ips.py" ] || [ -f "$REPO_DIR/rotate_ips.py" ]; then
     SYNC_PY=$([ -f "$REPO_DIR/rotate_ips.py" ] && echo "$REPO_DIR/rotate_ips.py" || echo "$HOME/rotate_ips.py")
     sudo tee /etc/systemd/system/oci-secondary-ips.service > /dev/null <<EOF
