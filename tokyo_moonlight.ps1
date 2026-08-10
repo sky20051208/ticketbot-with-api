@@ -22,7 +22,9 @@ if (Test-Path $TokyoIpFile) { $ip = (Get-Content $TokyoIpFile -ErrorAction Silen
 if (-not $ip) {
     Write-Host "==> 查詢東京機 IP" -ForegroundColor Cyan
     Push-Location $PSScriptRoot
-    try { $ip = (python aws_tokyo.py ip).Trim() } finally { Pop-Location }
+    # 機器沒開時 `ip` 什麼都不印 → $null，直接 .Trim() 會噴 InvokeMethodOnNull。
+    # 先轉字串再 Trim，才會落到下面那句看得懂的「拿不到 IP，機器可能沒開」。
+    try { $ip = "$(python aws_tokyo.py ip)".Trim() } finally { Pop-Location }
 }
 if (-not $ip) { Warn "拿不到 IP，機器可能沒開"; Read-Host "按 Enter 關閉"; exit 1 }
 

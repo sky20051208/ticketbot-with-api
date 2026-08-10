@@ -84,7 +84,22 @@ def main():
             err = (r.stderr or "").strip()
             hint = "（要 root 權限）" if "not permitted" in err else ""
             print(f"  {ip} 失敗: {err}{hint}")
-    print(f"完成，補了 {added} 顆")
+
+    # **也要拿掉 AWS 上已經不存在的** —— 只加不刪的話，在 AWS 移掉一顆次要 IP 之後
+    # 網卡上還留著，webgui 的出口 IP 下拉就會列出一個「綁了完全不通」的選項
+    # （私有 IP 沒有對應的 Elastic IP 就沒有對外路由），而且是靜默失敗。
+    stale = have - set(ips)
+    removed = 0
+    for ip in sorted(stale):
+        r = subprocess.run(["ip", "addr", "del", f"{ip}/{prefix}", "dev", nic],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"  移除 {ip}（AWS 上已不存在）")
+            removed += 1
+        else:
+            print(f"  {ip} 移除失敗: {(r.stderr or '').strip()}")
+
+    print(f"完成，補了 {added} 顆、移除 {removed} 顆")
     return 0
 
 

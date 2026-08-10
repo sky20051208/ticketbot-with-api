@@ -33,8 +33,11 @@ try {
     python aws_tokyo.py start
     if ($LASTEXITCODE -ne 0) { Warn "開機失敗"; exit 1 }
 
-    $ip = (python aws_tokyo.py ip).Trim()
-    if (-not $ip) { Warn "拿不到公網 IP"; exit 1 }
+    # 機器沒開時 `ip` 什麼都不印，PowerShell 會拿到 $null —— 直接 .Trim() 會噴
+    # 「不可在值為 Null 的運算式上呼叫方法」（2026-08-10 踩到）。先轉字串再 Trim。
+    # aws_tokyo.py start 現在會等 IP 關聯完才回來，這裡只是不要讓例外蓋掉真正的原因。
+    $ip = "$(python aws_tokyo.py ip)".Trim()
+    if (-not $ip) { Warn "拿不到公網 IP —— 跑 python aws_tokyo.py status 看機器狀態"; exit 1 }
     Set-Content -Path $TokyoIpFile -Value $ip -Encoding ascii
 } finally { Pop-Location }
 

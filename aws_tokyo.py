@@ -201,6 +201,23 @@ def _wait_state(iid: str, waiter: str, label: str) -> None:
     print(" 完成")
 
 
+def _wait_public_ip(timeout: float = 90.0) -> str:
+    """等公網 IP 真的關聯上來，回 IP（逾時回空字串）。
+
+    **`instance_running` waiter 只保證狀態變成 running** —— 公網 IP 的關聯會再慢個
+    幾秒，那段空窗期 describe_instances 讀到的 PublicIpAddress 是空的。
+    2026-08-10 踩到：start 印出「狀態 running / 公網 IP （關機中沒有）」，
+    接著 tokyo_start.ps1 的 `(python aws_tokyo.py ip).Trim()` 對 null 呼叫方法直接炸掉。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ip = (find_instance() or {}).get("PublicIpAddress")
+        if ip:
+            return ip
+        time.sleep(2)
+    return ""
+
+
 def start() -> None:
     inst = find_instance()
     if not inst:
@@ -208,6 +225,8 @@ def start() -> None:
     if inst["State"]["Name"] != "running":
         ec2().start_instances(InstanceIds=[inst["InstanceId"]])
         _wait_state(inst["InstanceId"], "instance_running", "START")
+    if not _wait_public_ip():
+        print("[START] ⚠ 等不到公網 IP —— 再跑一次 `python aws_tokyo.py status` 看看")
     sync_ip(quiet=True)      # 公網 IP 每次開機都會換，家裡 IP 也可能換
     status()
 
@@ -229,10 +248,14 @@ def status() -> None:
         print("還沒建立機器（跑 create）")
         return
     ip = inst.get("PublicIpAddress", "")
+    state = inst["State"]["Name"]
+    # 沒 IP 有兩種原因，分開講才知道要不要重試：關機中是正常的，
+    # running 卻沒 IP 是還在關聯中（等幾秒就會有）
+    no_ip = "（關機中沒有）" if state != "running" else "（還在關聯中，稍候再看）"
     print("=" * 62)
     print(f"  {NAME}  {inst['InstanceId']}  {inst['InstanceType']}")
-    print(f"  狀態    : {inst['State']['Name']}")
-    print(f"  公網 IP : {ip or '（關機中沒有）'}")
+    print(f"  狀態    : {state}")
+    print(f"  公網 IP : {ip or no_ip}")
     if ip:
         print(f"  SSH     : ssh -i {KEY_PATH} ubuntu@{ip}")
     print("=" * 62)
@@ -285,6 +308,12 @@ def state_only() -> None:
 #   2. **公網 IPv4 要錢**：ap-northeast-1 每顆 $0.005/hr ≈ $3.65/月，而且
 #      In-use 和 Idle 同價 —— **關機也照收**。Oracle 的 reserved public IP 是免費的
 # 帳號預設的 Elastic IP 配額是 5（`vpc-max-elastic-ips`），要更多得去 Service Quotas 申請。
+#
+# **踩過的坑（2026-08-10）**：一旦有任何 Elastic IP 關聯到這張網卡，AWS 就**不再自動配
+# 公網 IP 給主私有 IP**（即使子網的 MapPublicIpOnLaunch=True）。第一版把 5 顆 EIP 全綁
+# 在次要 IP 上，結果重開機後主 IP 沒有公網位址 —— **SSH 直接進不去**，而且 `start` 只會
+# 印「還在關聯中」讓人以為在等。所以現在**第一顆 EIP 一定綁主 IP**，剩下的才給次要。
+# 主 IP 那顆同時是 SSH 入口和「不綁定」時的預設出口，所以 N 顆 EIP = N 個獨立出口。
 MULTI_IP_TAG = "ticketplus-egress"
 
 
@@ -311,22 +340,26 @@ def multi_ip() -> None:
     eni_id = eni["NetworkInterfaceId"]
     privs = eni["PrivateIpAddresses"]
     secondaries = [p for p in privs if not p["Primary"]]
-    print(f"目前次要私有 IP {len(secondaries)} 顆，目標 {count} 顆")
+    # count 是「總出口數」：主 IP 佔一個（SSH 入口 + 不綁定時的預設出口），
+    # 其餘才是次要 IP。這樣算才跟使用者看到的下拉選項數對得起來。
+    want_secondary = max(0, count - 1)
+    print(f"目標 {count} 個出口 = 主 IP 1 + 次要 {want_secondary}（目前次要 {len(secondaries)}）")
 
     # 1. 補足次要私有 IP（AWS 會自己從子網挑）
-    need = count - len(secondaries)
+    need = want_secondary - len(secondaries)
     if need > 0:
         c.assign_private_ip_addresses(NetworkInterfaceId=eni_id,
                                       SecondaryPrivateIpAddressCount=need)
         print(f"  已加 {need} 顆次要私有 IP")
         eni = _instance_eni(find_instance())
-        secondaries = [p for p in eni["PrivateIpAddresses"] if not p["Primary"]]
 
-    # 2. 每顆配一顆 Elastic IP。先撿已經配好但沒綁的，不夠才新配 —— 配額只有 5，
-    #    而且每顆閒置一樣要錢，不能亂長。
+    # 2. 主 IP 先配 —— 網卡上一有 EIP，AWS 就停掉自動公網 IP，主 IP 沒補上就斷 SSH
+    targets = sorted(_instance_eni(find_instance())["PrivateIpAddresses"],
+                     key=lambda x: not x["Primary"])[:count]
+
     addrs = c.describe_addresses()["Addresses"]
     spare = [a for a in addrs if not a.get("AssociationId")]
-    for p in secondaries[:count]:
+    for p in targets:
         ip = p["PrivateIpAddress"]
         if p.get("Association", {}).get("PublicIp"):
             print(f"  {ip:<16} 已有 {p['Association']['PublicIp']}")
