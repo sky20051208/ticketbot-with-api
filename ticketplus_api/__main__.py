@@ -230,7 +230,11 @@ def _warn_if_serial_required(session, session_id: str, targets):
              if any(i.get("id") == p["productId"] and i.get("serialKey")
                     for i in (infos.get("product") or []))]
     if named:
-        reasons.append("票種綁序號：" + "、".join(str(p.get("name")) for p in named))
+        # 票種名常常整場都叫「全票」，直接串起來會印出 70 個「全票」把整行洗掉 ——
+        # 這是開賣前最後一眼要看的警告，不能被雜訊蓋住。去重 + 只列前幾個。
+        uniq = list(dict.fromkeys(str(p.get("name")) for p in named))
+        shown = "、".join(uniq[:3]) + ("…" if len(uniq) > 3 else "")
+        reasons.append(f"{len(named)} 個票種綁序號（{shown}）")
 
     if not reasons:
         return

@@ -61,13 +61,47 @@ _PROFILES = [
 ]
 
 
+def _supported() -> list[tuple[str, str, str]]:
+    """只留這台機器的 curl_cffi 真的認得的指紋。
+
+    **不同機器的 curl_cffi 版本不一樣**：東京機是 0.16（有 chrome145/146、firefox147），
+    開發機是 0.14（沒有）。清單裡塞了不支援的目標，`Session(impersonate=...)` 會直接
+    拋 ImpersonateError 讓整個 bot 起不來 —— 2026-08-10 在本機踩到。
+    所以啟動時先過濾，寧可指紋種類少一點也不能炸掉。
+    """
+    global _SUPPORTED_CACHE
+    if _SUPPORTED_CACHE is not None:
+        return _SUPPORTED_CACHE
+    try:
+        import typing
+        from curl_cffi.requests.impersonate import BrowserTypeLiteral
+        names = set(typing.get_args(BrowserTypeLiteral))
+    except Exception:
+        try:
+            from curl_cffi.requests import BrowserType
+            names = {b.value for b in BrowserType}
+        except Exception:
+            names = set()
+    usable = [p for p in _PROFILES if not names or p[0] in names] or [_PROFILES[-1]]
+    dropped = len(_PROFILES) - len(usable)
+    if dropped:
+        print(f"[SESSION] 這台的 curl_cffi 不支援其中 {dropped} 種指紋，"
+              f"可用 {len(usable)} 種（多開的區隔度會下降，升級 curl_cffi 可恢復）")
+    _SUPPORTED_CACHE = usable
+    return usable
+
+
+_SUPPORTED_CACHE = None
+
+
 def browser_profile() -> tuple[str, str, str]:
     """這個 instance 該用哪一組瀏覽器指紋。回 (impersonate, 家族, User-Agent)。
 
     **每次都重讀 `config.ACC_ID`**，不要在 import 時算好 —— GUI 是用
     `load_config_override()` 在啟動後才把 ACC_ID 蓋進來的。
     """
-    return _PROFILES[int(config.ACC_ID or 0) % len(_PROFILES)]
+    pool = _supported()
+    return pool[int(config.ACC_ID or 0) % len(pool)]
 
 
 def _client_hints(family: str, ua: str) -> dict:
