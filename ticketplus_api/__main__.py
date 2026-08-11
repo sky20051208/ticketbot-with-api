@@ -30,7 +30,8 @@ from LineBot import line_push
 
 from ticketplus_api import catalog, crypto, parsing, reserve as tp_reserve
 from ticketplus_api.session import (build_session, describe_token, extract_token,
-                                    make_keepalive, token_remaining, warmup_session)
+                                    make_keepalive, token_remaining, warmup_queue,
+                                    warmup_session)
 from ticketplus_api import browser_session as tp_browser
 
 # 清票冷卻（對齊拓元 FSM，見 tixcraftapi/runner.py）：
@@ -309,6 +310,10 @@ async def main_async():
         print("[TIMER] 定時啟動已關閉，直接開搶")
 
     token = await _refresh_token_if_stale(token, tab)
+    # 開搶前最後一步：確保 queue 網域的連線是熱的（實測省約 5ms，不多但免費）。
+    # 倒數期間 keepalive 已經暖過一次，這裡再確認一次，順便涵蓋
+    # 「關掉定時啟動、直接開搶」那條路 —— 那條完全不會走 make_keepalive。
+    warmup_queue(session)
     outcome = poll_and_grab(session, plan, token)
 
     if outcome.get("orderId"):

@@ -17,7 +17,7 @@ from curl_cffi import requests as cf_requests
 
 import config
 import proxy_pool
-from ticketplus_api import BASE, CONFIG_API, USER_API
+from ticketplus_api import BASE, CONFIG_API, QUEUE_API, USER_API
 
 # 多開時每個 instance 要長得不一樣。**只換 IP 不夠** —— 20~30 個客人的帳號如果
 # TLS 指紋、User-Agent、Sec-Ch-Ua 全部一模一樣，同一毫秒下單同一場活動，那本身就是
@@ -278,19 +278,25 @@ def make_keepalive(session: cf_requests.Session, product_ids: list[str],
     為什麼非要主執行緒自己打：curl_cffi 的連線池是 thread-local，背景 thread 暖的是
     它自己那條，暖不到主執行緒 —— 而 T-0 第一發偵測正是主執行緒打的。
 
-    **只暖票況網域，刻意不碰 queue.ticketplus.com.tw**（2026-07-29 決定）：搶票前對排隊
-    系統發任何請求都跟「還沒要買票」的正常使用者行為不符，寧可讓第一發 enqueue 自己付
-    TLS 握手，也不要在對方的排隊系統留下多餘足跡。
+    **queue 網域也要暖**（2026-08-12 改；原本刻意不暖）。舊的理由是「開賣前碰排隊系統
+    不像正常使用者」，但實測推翻了那個顧慮：未開賣時打 enqueue 拿到的是官方定義好的
+    `errCode 137 + waitSecond 10`，跟開賣後排隊**完全同一個回應** —— 對方系統本來就
+    預期有人會提早來排，這是正常行為。
 
-    這個代價 2026-08-06 量準了：純 TCP+TLS 到 queue 網域是 **175ms**（TCP 66 + TLS 107；
-    那台還在 TLS 1.2，握手要兩個往返，apis 是 1.3 只要 61ms）。原本註解寫「約 0.6s」
-    是高估。同日一次實測第一發 enqueue 花 2437ms，扣掉握手還有 2.2s —— 那是伺服器端
-    在建排隊，不是我們的連線成本，暖機也省不掉。
+    **但省下的比想像中少，別高估**。2026-08-06 從台灣量到 175ms；搬到東京後實測
+    冷連線只剩 **10ms**、熱連線 5ms —— 也就是**暖機只省約 5ms**。
+
+    先前看到「第 1 發 enqueue 110ms、第 2 發起 11ms」，我一度以為那 99ms 是握手，
+    **是錯的**：同一個網域單純 GET 的冷連線只要 10ms。那 99ms 是**伺服器端處理
+    第一次 enqueue** 的成本（建立排隊項目），暖機省不掉，只能認了。
+
+    那還做嗎？做，因為零成本零風險。用一發**單純的 GET**（不是 enqueue）把 TCP+TLS
+    建起來 —— 只要同一個 host 連線池就會重用，不必真的去排隊，footprint 最小。
 
     最後 stop_before 秒停手，不讓網路 IO 影響倒數精度。"""
     url = f"{CONFIG_API}/get?productId={','.join(product_ids)}&"
     headers = build_headers()
-    state = {"last": 0.0}
+    state = {"last": 0.0, "queue_warmed": False}
 
     def _tick(remaining: float):
         if remaining <= stop_before:
@@ -306,4 +312,25 @@ def make_keepalive(session: cf_requests.Session, product_ids: list[str],
         except Exception as e:
             print(f"[KEEPALIVE] ping 失敗: {type(e).__name__}: {e}")
 
+        # queue 網域暖一次就夠 —— 之後每輪的票況 ping 會讓整個連線池保持活著。
+        # 放在票況 ping 之後，確保偵測那條連線優先。
+        if not state["queue_warmed"]:
+            state["queue_warmed"] = True
+            warmup_queue(session)
+
     return _tick
+
+
+def warmup_queue(session: cf_requests.Session):
+    """把 queue 網域的 TCP+TLS 先建起來（實測省約 5ms：冷 10ms → 熱 5ms）。
+
+    刻意打**根路徑的 GET**而不是真的 enqueue：連線池是 per-host 的，握完手就達到目的，
+    不必在對方的排隊系統多留一次抽籤紀錄。回 404 是正常的（那個路徑本來就沒有 handler）。
+    """
+    t0 = time.monotonic()
+    try:
+        res = session.get(f"{QUEUE_API}/", headers=build_headers(), timeout=5)
+        print(f"[WARMUP] 排隊網域已暖機 HTTP {res.status_code} "
+              f"（{(time.monotonic() - t0) * 1000:.0f}ms）")
+    except Exception as e:
+        print(f"[WARMUP] 排隊網域暖機失敗（不致命）: {type(e).__name__}")
