@@ -10,7 +10,9 @@
 """
 import math
 import random
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from curl_cffi import requests as cf_requests
 
@@ -153,3 +155,183 @@ def get_infos(session: cf_requests.Session, product_ids: list[str] | None = None
     if log:
         print(f"[INFO] 票況 RTT {rtt:.0f}ms")
     return data.get("result") or {}, False
+
+
+# 併行偵測（見 InfoPoller）：RETRY_INTERVAL 小於這個值才值得開，再大的話 RTT 已經不是
+# 瓶頸，多開連線只是白白多打對方。
+PIPELINE_BELOW = 0.15
+# 在途上限。實際同時在途數 ≈ RTT / interval（65ms / 50ms ≈ 2），這裡抓 0.3s 的 RTT
+# 餘裕是為了 T-0 塞車那幾發（實測會噴到 127ms），寧可多備 thread 也不要卡住節奏。
+_INFLIGHT_RTT_BUDGET = 0.30
+_MAX_INFLIGHT = 8
+
+
+class InfoPoller:
+    """票況讀數來源，把「多久送一發」跟「等不等上一發回來」拆開。
+
+    依序輪詢時真正的週期是 **RTT + interval**，不是 interval —— 實測東京→遠大
+    65ms + 50ms = 115ms，所以 `RETRY_INTERVAL=0.05` 只跑出 8.7 次/秒，偵測盲區
+    平均 58ms。併行模式改成「時間到就送，不管上一發回來沒」，週期就真的等於
+    interval：20 次/秒、盲區平均 25ms。
+
+    **只在開賣前併行**。那是唯一在跟別人比毫秒的時候；開賣後的清票迴圈本來就是 5s
+    冷卻一輪，併行毫無意義還多打對方，所以呼叫端偵測到開賣就把 `pipelined` 關掉。
+
+    curl_cffi 的連線池是 **thread-local**，所以每條 worker 都要自己建連線，而且
+    **一定要在倒數期間就建好**（見 `keepalive`）—— 實測這個網域每建一條新連線，
+    第一發要 **~2.1s**，砸在 T-0 會比不併行還糟。
+
+    快取碰撞不必擔心：`_fresh_params` 的變體數是 id 數的階乘，票種一多就幾乎不可能
+    撞到同一個 cache key；票種少到會撞的活動，`_MIN_VARIANTS` 那邊本來就會先警告。
+    """
+
+    def __init__(self, session: cf_requests.Session, product_ids: list[str],
+                 area_ids: list[str], interval: float):
+        self.session = session
+        self.product_ids = product_ids
+        self.area_ids = area_ids
+        self.interval = interval
+        self.pipelined = interval < PIPELINE_BELOW
+        self.workers = min(_MAX_INFLIGHT,
+                           max(2, math.ceil(_INFLIGHT_RTT_BUDGET / interval)))
+        self._pool: ThreadPoolExecutor | None = None
+        self._inflight: list = []
+        self._warming: list = []
+        self._warmed = False
+        self._last_ping = 0.0
+        self._next_send: float | None = None
+
+    def describe(self) -> str:
+        if not self.pipelined:
+            return (f"依序輪詢，間隔 {self.interval * 1000:.0f}ms"
+                    f"（實際頻率 = 1/(RTT+間隔)，會比設定值低）")
+        return (f"併行偵測，每 {self.interval * 1000:.0f}ms 送一發不等回應"
+                f"（{1 / self.interval:.0f} 次/秒，最多 {self.workers} 發在途）")
+
+    def keepalive(self, remaining: float, start_at: float = 30.0,
+                  stop_before: float = 12.0):
+        """倒數期間把 worker 連線建好並維持住。掛在 TimeWatcher 的 on_tick 上。
+
+        **這步非做不可**：實測這個網域**每建一條新連線第一發就要 ~2.1s** —— DNS 只佔
+        29ms，換新 session、換新 thread、把 6 條錯開 80ms 送，量到的都是 2.1~2.2s，
+        是連線本身的成本不是併發互卡。等到 poll_and_grab 才建，那 2.1s 會整個吃掉
+        lead_seconds，**比不併行還糟**。
+
+        剩 30s 才開始建（太早建，連線閒置會被對方關掉），之後每 5s 續一次，剩 12s 停手
+        —— 跟 session.make_keepalive 的 stop_before 同一個理由：不讓網路 IO 干擾倒數精度。
+        送出去就不等結果，所以不會卡住倒數。
+
+        注意 `stop_before` **只擋續命、不擋第一次建線**：使用者可能在剩 5 秒才按 START，
+        那時候仍然得把連線建起來（晚建也遠比不建好，不然 T-0 每條各吃一次 2.1s）。
+        """
+        if not self.pipelined or remaining > start_at:
+            return
+        if self._pool is None:
+            self._spawn()
+        elif remaining > stop_before and time.monotonic() - self._last_ping >= 5.0:
+            self._ping()
+        self._report()
+
+    def warm(self):
+        """沒走倒數（`ENABLE_TIME_WATCHER=False`）時的補救：同步把連線建好。
+
+        會擋住約 2.1s，但那條路本來就沒有 T-0 可言，晚 2 秒開始無所謂 ——
+        真正不能接受的是「該暖沒暖」，那會讓前幾發偵測各自吃一次 2.1s。
+        """
+        if not self.pipelined or self._warmed:
+            return
+        if self._pool is None:
+            self._spawn()
+        for fut in self._warming:
+            fut.result()
+        self._report()
+
+    def _spawn(self):
+        """生出 N 條常駐 thread，每條各自把連線建起來。
+
+        用 Barrier 卡住是為了**逼 ThreadPoolExecutor 真的生出 N 條 thread** —— 不然它會
+        重用先跑完的那條，剩下的到 T-0 才第一次跑，2.1s 就砸在最貴的時候。
+        """
+        self._pool = ThreadPoolExecutor(max_workers=self.workers,
+                                        thread_name_prefix="tp-poll")
+        self._ping(gated=True)
+
+    def _ping(self, gated: bool = False):
+        gate = threading.Barrier(self.workers) if gated else None
+
+        def _one():
+            if gate is not None:
+                try:
+                    gate.wait(timeout=20)
+                except threading.BrokenBarrierError:
+                    pass      # 湊不齊就各自跑，頂多少暖到一條
+            return self._read()
+
+        self._warming = [self._pool.submit(_one) for _ in range(self.workers)]
+        self._last_ping = time.monotonic()
+
+    def _report(self):
+        """暖機結果回收（非阻塞：還沒跑完就下次再說）。"""
+        if not self._warming or not all(f.done() for f in self._warming):
+            return
+        rtts = [f.result()[2] for f in self._warming]
+        self._warming = []
+        if not self._warmed:
+            self._warmed = True
+            print(f"[WARMUP] 偵測執行緒已暖機 {self.workers} 條"
+                  f"（RTT {min(rtts):.0f}~{max(rtts):.0f}ms）")
+
+    def _read(self) -> tuple[dict, bool, float]:
+        """一發票況。**不會 raise**（get_infos 自己吞掉所有例外）。"""
+        t0 = time.perf_counter()
+        result, blocked = get_infos(self.session, self.product_ids, self.area_ids,
+                                    log=False)
+        return result, blocked, (time.perf_counter() - t0) * 1000
+
+    def next(self) -> tuple[dict, bool, float]:
+        """下一筆 (result, blocked, rtt_ms)。併行模式回的是**最早送出且已完成**的那發。"""
+        if self._next_send is None:
+            self._next_send = time.monotonic()
+        if not self.pipelined or self._pool is None:
+            _sleep_until(self._next_send)
+            reading = self._read()
+            # 依序模式維持原本語意：**回應之後**才等 interval（週期 = RTT + interval）。
+            # 「固定節奏送」是併行模式專屬的 —— 依序模式照抄的話等於偷偷幫所有舊設定
+            # 加速 20%，那不是這次要改的東西。
+            self._next_send = time.monotonic() + self.interval
+            return reading
+
+        while True:
+            now = time.monotonic()
+            while len(self._inflight) < self.workers and now >= self._next_send:
+                self._inflight.append(self._pool.submit(self._read))
+                self._next_send += self.interval
+                if self._next_send <= now:
+                    # 落後了（GIL 抖動 / 剛結束冷卻）就重新對時，不要補打一串
+                    self._next_send = now + self.interval
+
+            for fut in self._inflight:
+                if fut.done():
+                    self._inflight.remove(fut)
+                    return fut.result()
+
+            if not self._inflight:
+                _sleep_until(self._next_send)      # 冷卻中，不用忙等
+            else:
+                time.sleep(0.002)
+
+    def pause(self, seconds: float):
+        """冷卻：停送新的、丟掉在途結果（冷卻完那些讀數已經過期了）。"""
+        self._inflight.clear()
+        self._next_send = time.monotonic() + seconds
+
+    def close(self):
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+
+
+def _sleep_until(deadline: float):
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        time.sleep(remaining)

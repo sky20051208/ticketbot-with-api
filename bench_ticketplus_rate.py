@@ -1,8 +1,12 @@
 """量遠大 TicketPlus 票況 API 的速率上限 —— 決定偵測迴圈可以縮到多快。
 
-**為什麼要量**：`ticketplus_api/__main__.py` 的偵測迴圈是序列的
-（`get_infos()` → `sleep(RETRY_INTERVAL)` → 再來一次），預設 0.3s 代表開賣翻
-`onsale` 的瞬間平均有 150ms 看不到。那個盲區比「把機器搬到東京」省下的 55ms 還大。
+**為什麼要量**：開賣翻 `onsale` 的瞬間有一段看不到的盲區，那個盲區比「把機器搬到東京」
+省下的 55ms 還大。`RETRY_INTERVAL` 就是在調它，而這支決定它能調到多小。
+
+**注意兩種模式的換算不一樣**（見 `catalog.InfoPoller`）：
+  - 依序（RETRY_INTERVAL ≥ 0.15）：週期 = **RTT + interval**，實際速率比 1/interval 低
+  - 併行（< 0.15）：不等回應固定節奏送，實際速率**就是** 1/interval
+下面結論給的 `RETRY_INTERVAL = 1/安全速率` 是照併行算的（保守值，依序只會更慢）。
 
 但不能盲目調快：`catalog.get_infos()` 已經認得 errCode 110（流量管制），被擋要退避
 8 秒，打太兇反而更慢。拓元實測是同一 URL 約 3 req/s 就 403，遠大沒人量過 —— 這支就是

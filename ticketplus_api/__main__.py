@@ -106,29 +106,39 @@ async def _resolve_token(event_id: str):
     return token, None, None
 
 
-def poll_and_grab(session, plan: dict, token: str) -> dict:
+def poll_and_grab(session, plan: dict, token: str, poller) -> dict:
     """無限清票直到搶到 / 致命錯誤 / 使用者 STOP。冷卻節奏借鑑拓元 FSM：
       - **未開賣**（沒有任何票種 onsale，等 T-0）→ 全速輪詢（golden，不冷卻）
       - **有可買票** → 立刻送單（golden，永不冷卻，第一拍黃金時間）
       - **開賣但目標票售完/被搶走** → 5s 清票冷卻等回流（per 票種各自冷卻，同輪仍會馬上
         去搶別的票區，只有失敗的那個票種等 5s）
       - **被流量管制/擋**（HTTP 429/403 或 errCode 110）→ 8s 退避（給 server/IP 喘息）
-    回 {"orderId": …} 或 {"error": …, "fatal": True}。"""
-    product_ids = [p["productId"] for _, p in plan["targets"]]
-    area_ids = list(dict.fromkeys(a["ticketAreaId"] for a, _ in plan["targets"] if a))
-    amount = plan["amount"]
-    fast_interval = float(config.RETRY_INTERVAL or 0.3)
 
+    開賣前的偵測交給 `catalog.InfoPoller`（在 main_async 建好，倒數期間就把連線暖起來）：
+    RETRY_INTERVAL 夠小時它會併行送、不等上一發回來，週期才真的等於 interval 而不是
+    RTT+interval。翻 onsale 之後改回依序 —— 清票是 5s 一輪，併行只是多打對方。
+
+    回 {"orderId": …} 或 {"error": …, "fatal": True}。"""
+    poller.warm()      # 走過倒數的話已經暖好了，這裡是 no-op
+    try:
+        return _grab_loop(poller, plan, token, plan["amount"])
+    finally:
+        poller.close()
+
+
+def _grab_loop(poller, plan: dict, token: str, amount: int) -> dict:
     started = time.monotonic()
     cooldown: dict[str, float] = {}   # per 票種：售完/被搶走後的清票冷卻
     attempt = 0
+    log = _PollLog()
 
     while True:
         attempt += 1
-        result, blocked = catalog.get_infos(session, product_ids, area_ids)
+        result, blocked, rtt = poller.next()
         if blocked:
+            log.flush()
             print(f"[POLL] #{attempt} 被流量管制/擋，退避 {BLOCKED_COOLDOWN:.0f}s（對齊拓元 BLOCKED）")
-            time.sleep(BLOCKED_COOLDOWN)
+            poller.pause(BLOCKED_COOLDOWN)
             continue
         product_infos, area_infos = parsing.index_infos(result)
 
@@ -139,12 +149,14 @@ def poll_and_grab(session, plan: dict, token: str) -> dict:
                                      amount, exclude=config.EXCLUDE_AREA_KEYWORD)
         if not target:
             open_now = parsing.sale_open(product_infos)
-            # 每一發都印出來（不隱藏）——開賣翻 onsale 的瞬間才看得到
+            if open_now:
+                # 開賣後就沒有搶毫秒的意義了，改回依序，別再對 origin 灌 20 req/s
+                poller.pipelined = False
             states = {i.get("status") for i in product_infos.values()} or {"?"}
             phase = f"清票中…{CLEAR_COOLDOWN:.0f}s 等回流" if open_now else "全速等開賣"
-            print(f"[POLL] #{attempt} 尚無可買票種（{phase}，狀態: {'/'.join(sorted(map(str, states)))}）")
-            # 開賣但沒票 → 5s 清票；還沒開賣 → 全速等 T-0（golden，抓開賣瞬間）
-            time.sleep(CLEAR_COOLDOWN if open_now else fast_interval)
+            log.poll(attempt, phase, states, rtt)
+            if open_now:
+                poller.pause(CLEAR_COOLDOWN)
             continue
 
         area, product, count = target
@@ -152,9 +164,10 @@ def poll_and_grab(session, plan: dict, token: str) -> dict:
         seat = bool(plan["session"].get("ticketArea") and info.get("seatAssignment"))
         detect_s = time.monotonic() - started
         label = parsing.target_label(area, product)
+        log.flush()
         print(f"[GRAB] 目標: {label} ${product.get('price')} × {count} 張"
               f"{'（系統配位）' if seat else ''}"
-              f" — 開搶後 {detect_s:.1f}s 偵測到票（第 {attempt} 輪）")
+              f" — 開搶後 {detect_s:.1f}s 偵測到票（第 {attempt} 輪，票況 RTT {rtt:.0f}ms）")
 
         payload = tp_reserve.build_payload(product["productId"], count,
                                            seat_assignment=seat,
@@ -171,7 +184,41 @@ def poll_and_grab(session, plan: dict, token: str) -> dict:
             return outcome
         # 送單失敗（售完/被搶走）→ 該票種 5s 清票冷卻，同輪馬上去搶別的票區
         print(f"[GRAB] 失敗: {outcome.get('error')} → 該票種冷卻 {CLEAR_COOLDOWN:.0f}s，換下一個票區")
+        poller.pipelined = False
         cooldown[product["productId"]] = time.monotonic() + CLEAR_COOLDOWN
+
+
+class _PollLog:
+    """輪詢的 log 節流。
+
+    併行模式下一秒有 20 筆讀數，原本「每一發都印」會把畫面沖爛、也拖慢主迴圈。
+    但當初刻意不隱藏是為了**看得到 pending 翻 onsale 的那一瞬間** —— 所以規則是：
+    狀態一有變化就立刻印（那是唯一真正重要的一行），沒變化的話每 0.5s 印一筆摘要。
+    """
+
+    _QUIET = 0.5
+
+    def __init__(self):
+        self._states = None
+        self._last = 0.0
+        self._skipped = 0
+
+    def poll(self, attempt: int, phase: str, states: set, rtt: float):
+        key = "/".join(sorted(map(str, states)))
+        now = time.monotonic()
+        if key == self._states and now - self._last < self._QUIET:
+            self._skipped += 1
+            return
+        changed = self._states is not None and key != self._states
+        tail = f"，前 {self._skipped} 筆同狀態" if self._skipped else ""
+        print(f"[POLL] #{attempt} {'狀態變了 → ' if changed else ''}尚無可買票種"
+              f"（{phase}，狀態: {key}，RTT {rtt:.0f}ms{tail}）")
+        self._states, self._last, self._skipped = key, now, 0
+
+    def flush(self):
+        if self._skipped:
+            print(f"[POLL] （前 {self._skipped} 筆同狀態省略）")
+            self._skipped = 0
 
 
 def build_plan(session, event_id: str) -> dict | None:
@@ -301,11 +348,22 @@ async def main_async():
         return
     warmup_session(session)
 
+    product_ids = [p["productId"] for _, p in plan["targets"]]
+    area_ids = list(dict.fromkeys(a["ticketAreaId"] for a, _ in plan["targets"] if a))
+    poller = catalog.InfoPoller(session, product_ids, area_ids,
+                                float(config.RETRY_INTERVAL or 0.3))
+    print(f"[POLL] {poller.describe()}")
+
     if config.ENABLE_TIME_WATCHER:
         watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL, lead_seconds=0.4)
         print(f"[TIMER] 目標時間: {config.TARGET_START_TIME}")
-        product_ids = [p["productId"] for _, p in plan["targets"]]
-        await watcher.wait_for_open_async(on_tick=make_keepalive(session, product_ids))
+        ping = make_keepalive(session, product_ids)
+
+        def _tick(remaining: float):
+            ping(remaining)             # 主執行緒的連線
+            poller.keepalive(remaining)  # 併行偵測那幾條 worker 的連線
+
+        await watcher.wait_for_open_async(on_tick=_tick)
     else:
         print("[TIMER] 定時啟動已關閉，直接開搶")
 
@@ -314,7 +372,7 @@ async def main_async():
     # 倒數期間 keepalive 已經暖過一次，這裡再確認一次，順便涵蓋
     # 「關掉定時啟動、直接開搶」那條路 —— 那條完全不會走 make_keepalive。
     warmup_queue(session)
-    outcome = poll_and_grab(session, plan, token)
+    outcome = poll_and_grab(session, plan, token, poller)
 
     if outcome.get("orderId"):
         alerts.play_checkout()

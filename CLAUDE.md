@@ -65,7 +65,7 @@ iv `!@#$FETIXEVENTiv`（前端 bundle 模組 9263 硬寫的），見 [crypto.py]
 | [ticketplus_api/__init__.py](ticketplus_api/__init__.py) | 四組 API base URL 常數（CONFIG / QUEUE / TICKET / USER） |
 | [ticketplus_api/crypto.py](ticketplus_api/crypto.py) | id 加解密（診斷用，主線用不到；`cryptography` 走 lazy import） |
 | [ticketplus_api/session.py](ticketplus_api/session.py) | curl_cffi session、XHR headers、`extract_token`、暖機、`make_keepalive`（主執行緒續命 callback） |
-| [ticketplus_api/catalog.py](ticketplus_api/catalog.py) | 唯讀 API：S3 靜態目錄（sessions/ticketAreas/products）+ 即時票況 `/get`。**都不需要登入** |
+| [ticketplus_api/catalog.py](ticketplus_api/catalog.py) | 唯讀 API：S3 靜態目錄（sessions/ticketAreas/products）+ 即時票況 `/get`；`InfoPoller` 併行偵測（見下）。**都不需要登入** |
 | [ticketplus_api/parsing.py](ticketplus_api/parsing.py) | 純挑選邏輯（零 HTTP）：挑場次、票區優先序、可買判斷、`pick_target` |
 | [ticketplus_api/reserve.py](ticketplus_api/reserve.py) | 送單：`enqueue`（排隊拿 uuid）→ `reserve`（換 orderId）。**唯一需要 token 的地方** |
 | [ticketplus_api/browser_session.py](ticketplus_api/browser_session.py) | nodriver：登入抓 token、搶到後導向訂單頁。沒有 /login 路由（登入是 dialog），開活動頁等 `user` cookie 出現 |
@@ -75,6 +75,23 @@ iv `!@#$FETIXEVENTiv`（前端 bundle 模組 9263 硬寫的），見 [crypto.py]
 `{"access_token": "<JWT>"}`。前端每支 API 自己塞 `Authorization: Bearer`，所以**只要那串 token，
 cookie 本身不用帶**。使用者說「找不到 cookie」通常是在看 Network 的 request cookie —— 要看
 DevTools → Application → Cookies → `user`。`extract_token()` 吃整串 cookie / 只有 user 的值 / 純 JWT。
+
+**開賣偵測（`catalog.InfoPoller`）**：`RETRY_INTERVAL` < 0.15 時自動改成**併行送**
+（不等上一發回來，固定節奏丟），否則維持依序。差別是週期：依序 = **RTT + interval**
+（東京實測 65+50 = 115ms，所以 `RETRY_INTERVAL=0.05` 只跑出 8.7 次/秒），併行 = interval
+（實測 19.8 次/秒、盲區 47ms）。開賣後 `pipelined` 由 `_grab_loop` 關掉 —— 清票是 5s
+一輪，併行只是多打對方。
+- **worker 連線一定要在倒數期間建好**（`poller.keepalive()` 掛在 TimeWatcher 的 on_tick）。
+  實測這個網域**每建一條新連線第一發要 ~2.1s**：DNS 只佔 29ms，換新 session、換新 thread、
+  把 6 條錯開 80ms 送，量到的都是 2.1~2.2s，是連線本身的成本不是並發互卡。擺到 T-0 才建
+  會整個吃掉 `lead_seconds=0.4`，**比不併行還糟**
+- worker 數 = `ceil(0.3 / interval)` 上限 8（0.3 是 RTT 餘裕，T-0 塞車實測會噴到 127ms）。
+  `_spawn()` 用 `threading.Barrier` 卡住是為了**逼 ThreadPoolExecutor 真的生出 N 條 thread**，
+  不然它會重用先跑完的那條，剩下的到 T-0 才第一次跑
+- log 由 `_PollLog` 節流（20 筆/秒印不完也拖慢主迴圈）：**狀態一變就立刻印**，
+  沒變則每 0.5s 一筆摘要 —— 保住「看得到 pending 翻 onsale 那一瞬間」的原意
+- **多開時總速率是 N 倍**：0.05s × 5 個 instance = 100 req/s。`catalog.py` 只實測過
+  單 IP 12 req/s 不被擋，再往上沒驗證過，多開請自己乘回去或分 IP
 
 **其他踩點**：
 - **兩種活動，票種掛的位置完全不同**（2026-07-29 踩過，無劃位的活動被誤判成沒票）：
