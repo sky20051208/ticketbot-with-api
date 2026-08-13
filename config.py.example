@@ -24,6 +24,7 @@ ACTIVITY_SLUG = ""               # 活動 slug（從活動 URL 取）
 TICKET_AMOUNT = "1"              # 購票張數
 AREA_KEYWORD = ""                # 區域/價格關鍵字篩選（空字串 = 依選位策略）
 AREA_AUTO_SELECT_MODE = "關鍵字優先"  # 選位策略: 關鍵字優先 / 由上而下 / 由下而上 / 隨機
+CLEAR_MODE = "寬鬆"               # 清票模式: 嚴格(只買關鍵字命中的) / 寬鬆(位置與剩餘量取平衡)
 EXCLUDE_AREA_KEYWORD = "輪椅;身障;身心;障礙;Restricted View;燈柱遮蔽;視線不完整;身障票"
 DATE_KEYWORD = ""                # 場次日期篩選（空字串 = 選第一場）
 PRESALE_CODE = ""                # 會員碼 / presale code（空字串 = 不使用，頁面有答案會自動抓）

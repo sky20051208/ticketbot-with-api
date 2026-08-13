@@ -3,6 +3,7 @@ const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
 const PLATFORMS  = ["TIXCRAFT", "KKTIX", "TICKETPLUS"];
 const AREA_MODES = ["關鍵字優先", "由上而下", "由下而上", "隨機"];
+const CLEAR_MODES = ["寬鬆", "嚴格"];
 const MANUAL_COOKIE = "(手貼COOKIE)";
 let CUSTOMERS = [];  // [{name, user_id, concert}]，由 /api/customers 填（proxy 到 Cloudflare Worker + D1）
 let CHROME_PROFILES_BY_PLATFORM = {};  // {平台: [profile名...]}，由 /api/chrome_profiles 填
@@ -144,6 +145,7 @@ function renderCard(item) {
   bindText  (card, ".f-time",     cfg.TARGET_START_TIME);
   bindText  (card, ".f-qty",      cfg.TICKET_AMOUNT);
   bindSelect(card, ".f-areamode", AREA_MODES, cfg.AREA_AUTO_SELECT_MODE);
+  bindSelect(card, ".f-clearmode", CLEAR_MODES, cfg.CLEAR_MODE);
   bindText  (card, ".f-area",     cfg.AREA_KEYWORD);
   bindText  (card, ".f-exclude",  cfg.EXCLUDE_AREA_KEYWORD);
   bindText  (card, ".f-date",     cfg.DATE_KEYWORD);
@@ -245,6 +247,7 @@ function readCardConfig(card) {
     TARGET_START_TIME:       card.querySelector(".f-time").value,
     TICKET_AMOUNT:           card.querySelector(".f-qty").value,
     AREA_AUTO_SELECT_MODE:   card.querySelector(".f-areamode").value,
+    CLEAR_MODE:              card.querySelector(".f-clearmode").value,
     AREA_KEYWORD:            card.querySelector(".f-area").value,
     EXCLUDE_AREA_KEYWORD:    card.querySelector(".f-exclude").value,
     DATE_KEYWORD:            card.querySelector(".f-date").value,

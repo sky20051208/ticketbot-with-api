@@ -93,6 +93,29 @@ DevTools → Application → Cookies → `user`。`extract_token()` 吃整串 co
 - **多開時總速率是 N 倍**：0.05s × 5 個 instance = 100 req/s。`catalog.py` 只實測過
   單 IP 12 req/s 不被擋，再往上沒驗證過，多開請自己乘回去或分 IP
 
+**清票兩模式（`CLEAR_MODE`）**：分「嚴格」跟「寬鬆」，差別在**買不到首選時要不要退而求其次**。
+- **嚴格** = 只買 `AREA_KEYWORD` 命中的票區，其餘一律不買（`rank_targets(strict=True)`
+  直接把沒命中的丟掉，不當備胎）。沒填關鍵字會自動退回寬鬆並警告 —— 沒關鍵字的「嚴格」
+  等於全部排除，只會整場空轉
+- **寬鬆** = 命中的優先，但挑的是 `parsing.score_target()` 分數最高的：
+  ```
+  分數 = RANK_DECAY^名次 × count/(count + SUPPLY_HALF)      預設 0.85 / 4.0
+         ↑想要程度（使用者排的志願）  ↑搶到機率（只能從剩餘張數推）
+  ```
+  機率用飽和曲線不用線性 —— 1 張變 8 張是天壤之別，50 張變 100 張沒差。
+  實測：首選剩 1 張(0.20) 會讓給次選剩 30 張(0.75)，但第 6 志願剩 100 張(0.42) 搶不走
+- **同一票區底下的票種共用同一個名次**（`_area_ranks`），不然一區掛 3 個票種
+  （全票/身障/陪同）就會白白把下一個票區推後 3 名
+- **T-0 跟清票不需要分兩套邏輯**：T-0 時庫存都幾百幾千，機率分全部逼近 1.0 → 名次說了算，
+  等於照志願走；清票時庫存剩個位數，機率分才拉開差距。`SUPPLY_HALF` 就是這個切換點
+- **「要 poll 什麼」跟「要買什麼」是分開的**（`plan["poll_products"]` vs `plan["targets"]`）。
+  嚴格清票會把候選縮到 1~2 個票區，而 `_fresh_params` 繞 CloudFront 快取靠的是
+  **id 排列組合**，變體不足就繞不過、偵測慢約 1 秒 —— 剛好把併行偵測省下來的全賠回去。
+  所以偵測一律打整場所有 id（反正本來就是一發查全部，多帶不用多送請求），只有下單才看
+  targets。變體不足的警告因此掛在 `InfoPoller.__init__`，不在 `_fresh_params`
+  （那支也會被開賣前的一次性檢查呼叫，擺那裡會變成假警報，還會因為 one-shot 旗標
+  把真警告吃掉）
+
 **登記抽選（`isLottery`）—— 開搶前一定要先看的旗標**：TicketPlus 有兩種活動，
 一般搶票（先搶先贏）跟**登記抽選**（登記完隨機抽）。抽選那種**搶再快都沒用**，
 官方公告原文「將根據登記訂單進行隨機抽選」。判斷方式（`catalog.get_event_info()`，
@@ -199,7 +222,7 @@ GUI 每個 instance 把設定寫到 `profiles/acc_{id}/config.json`，Python 端
 
 GUI 寫出的 JSON key 必須和 config.py 變數名一字不差：
 `PLATFORM`, `COOKIE`, `COOKIE_SOURCE`, `CHROME_USER_DATA_DIR`, `ACTIVITY_SLUG`,
-`TICKET_AMOUNT`, `AREA_KEYWORD`, `AREA_AUTO_SELECT_MODE`, `EXCLUDE_AREA_KEYWORD`,
+`TICKET_AMOUNT`, `AREA_KEYWORD`, `AREA_AUTO_SELECT_MODE`, `EXCLUDE_AREA_KEYWORD`, `CLEAR_MODE`,
 `DATE_KEYWORD`, `PRESALE_CODE`, `TARGET_START_TIME`, `ENABLE_TIME_WATCHER`,
 `TIME_WATCH_URL`, `ENABLE_PROXY_POOL`, `LINE_USER_ID`, `TICKET_FEE`。
 

@@ -146,7 +146,8 @@ def _grab_loop(poller, plan: dict, token: str, amount: int) -> dict:
         available = {pid: info for pid, info in product_infos.items()
                      if cooldown.get(pid, 0) <= now}
         target = parsing.pick_target(plan["targets"], available, area_infos,
-                                     amount, exclude=config.EXCLUDE_AREA_KEYWORD)
+                                     amount, exclude=config.EXCLUDE_AREA_KEYWORD,
+                                     balanced=plan.get("balanced", False))
         if not target:
             open_now = parsing.sale_open(product_infos)
             if open_now:
@@ -240,21 +241,37 @@ def build_plan(session, event_id: str) -> dict | None:
         print("[PLAN] 這個場次底下沒有票種")
         return None
 
+    # config.py 是 gitignored 的，舊機器（例如剛 git pull 的 VPS）上不會有這個欄位 ——
+    # 用 getattr 給預設值，不然整支 bot 會在 build_plan 就 AttributeError 起不來。
+    # **但還是要記得補進那台的 config.py**：`load_config_override` 是用 hasattr 過濾的，
+    # 欄位不存在的話 GUI 上選的清票模式會被靜默忽略。
+    strict = str(getattr(config, "CLEAR_MODE", "寬鬆") or "寬鬆").strip() == "嚴格"
     targets = parsing.rank_targets(products, areas,
                                    keyword=config.AREA_KEYWORD,
                                    exclude=config.EXCLUDE_AREA_KEYWORD,
-                                   strategy=config.AREA_AUTO_SELECT_MODE)
+                                   strategy=config.AREA_AUTO_SELECT_MODE,
+                                   strict=strict)
     if not targets:
-        print("[PLAN] 排除後沒有可搶的票種")
+        print("[PLAN] 排除後沒有可搶的票種"
+              + ("（嚴格清票 + 關鍵字沒命中）" if strict else ""))
         return None
+    print(f"[PLAN] 清票模式: {'嚴格（只買關鍵字命中的）' if strict else '寬鬆（志願順序 × 剩餘張數取平衡）'}")
     kind = "有劃位" if areas else "無劃位"
     order = " > ".join(parsing.target_label(a, p) for a, p in targets)
     print(f"[PLAN] {kind}活動，優先序: {order}")
 
     _warn_if_serial_required(session, session_id, targets)
     _warn_if_lottery(session, event_id)
+
+    # **「要 poll 什麼」跟「要買什麼」要分開**：偵測一律打整場所有 id，只有下單才看
+    # targets。原因是 `catalog._fresh_params` 靠「把 id 排列順序打亂」來繞 CloudFront
+    # 快取，而變體數是 id 數的階乘 —— 嚴格清票把候選縮到 1~2 個票區時排列組合只剩 2 種，
+    # 直接繞不過快取、偵測慢約 1 秒，剛好把併行偵測省下來的都賠回去。
+    # 多帶 id 不用多送請求（本來就是一發查全部），純賺。
     return {"session": sess, "session_id": session_id, "targets": targets,
-            "amount": int(config.TICKET_AMOUNT or 1)}
+            "amount": int(config.TICKET_AMOUNT or 1), "balanced": not strict,
+            "poll_products": [p["productId"] for p in products],
+            "poll_areas": [a["ticketAreaId"] for a in areas]}
 
 
 def _warn_if_lottery(session, event_id: str):
@@ -368,8 +385,9 @@ async def main_async():
         return
     warmup_session(session)
 
-    product_ids = [p["productId"] for _, p in plan["targets"]]
-    area_ids = list(dict.fromkeys(a["ticketAreaId"] for a, _ in plan["targets"] if a))
+    # 偵測打整場的 id（見 build_plan 對 poll_products 的說明），不是只打要買的那幾個
+    product_ids = plan["poll_products"]
+    area_ids = plan["poll_areas"]
     poller = catalog.InfoPoller(session, product_ids, area_ids,
                                 float(config.RETRY_INTERVAL or 0.3))
     print(f"[POLL] {poller.describe()}")

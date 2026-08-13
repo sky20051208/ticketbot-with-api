@@ -24,7 +24,16 @@ _S3 = f"{CONFIG_API}/getS3"
 # 變體數低於這個就沒有繞過快取的意義：TTL 約 1.5s、輪詢 0.3s 代表一個 TTL 內會打 5 發，
 # 變體太少就會在快取還沒過期時就轉回同一個 key。留 4 倍餘裕。
 _MIN_VARIANTS = 20
-_warned_variants = False
+
+
+def _variants(n_products: int, n_areas: int) -> int:
+    """排列組合數 = 兩邊階乘相乘。只要判斷「夠不夠」，所以超過就直接夾住 ——
+    158 個票區真的去算 158! 沒有意義（而且慢）。"""
+    total = 1
+    for n in (n_products, n_areas):
+        for k in range(2, min(n, 8) + 1):     # 8! = 40320，遠超 _MIN_VARIANTS
+            total *= k
+    return total
 
 
 def _get_json(session: cf_requests.Session, url: str, timeout: float = 10.0) -> dict:
@@ -122,17 +131,12 @@ def _fresh_params(product_ids: list[str] | None,
     （p50 平平的 170ms 沒劣化），但**多開時總速率是 N 倍**，間隔要自己乘回去。
 
     票種和票區都只有 1~2 個的活動排列數不夠，這時就退回原本的行為 —— 不會更糟，
-    只是沒有變好。
+    只是沒有變好。**變體夠不夠的警告在 `InfoPoller.__init__`**，不在這裡：這支也會被
+    開賣前的一次性檢查呼叫（那種只帶 1~2 個 id，警告會變成假警報），而且真正在意
+    快取新鮮度的是高頻偵測那條路。
     """
-    global _warned_variants
     products = list(product_ids or [])
     areas = list(ticket_area_ids or [])
-
-    variants = math.factorial(len(products)) * math.factorial(len(areas))
-    if variants < _MIN_VARIANTS and not _warned_variants:
-        _warned_variants = True
-        print(f"[INFO] 這場只有 {len(products)} 票種 / {len(areas)} 票區，"
-              f"排列組合只有 {variants} 種，繞不過 CDN 快取（偵測會慢約 1 秒）")
 
     params = []
     if products:
@@ -226,6 +230,15 @@ class InfoPoller:
         self._warmed = False
         self._last_ping = 0.0
         self._next_send: float | None = None
+
+        # 只有高頻偵測在意「繞不繞得過 CDN 快取」，所以警告放這裡（一次性檢查不該喊）。
+        # 嚴格清票特別容易踩到：候選被縮到 1~2 個票區時排列組合就不夠了 —— 所以
+        # `build_plan` 才會另外給 poll_products/poll_areas，讓偵測照樣打整場的 id。
+        variants = _variants(len(product_ids or []), len(area_ids or []))
+        if variants < _MIN_VARIANTS:
+            print(f"[INFO] ⚠ 偵測只帶 {len(product_ids or [])} 票種 / "
+                  f"{len(area_ids or [])} 票區，排列組合 {variants} 種繞不過 CDN 快取"
+                  f"（偵測會慢約 1 秒）")
 
     def describe(self) -> str:
         if not self.pipelined:

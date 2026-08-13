@@ -45,6 +45,7 @@ class InstanceConfig(BaseModel):
     TICKET_AMOUNT: str = "1"
     AREA_KEYWORD: str = ""
     AREA_AUTO_SELECT_MODE: str = "關鍵字優先"
+    CLEAR_MODE: str = "寬鬆"
     EXCLUDE_AREA_KEYWORD: str = DEFAULT_EXCLUDE
     DATE_KEYWORD: str = ""
     PRESALE_CODE: str = ""
