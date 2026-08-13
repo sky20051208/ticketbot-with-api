@@ -147,7 +147,9 @@ def _grab_loop(poller, plan: dict, token: str, amount: int) -> dict:
                      if cooldown.get(pid, 0) <= now}
         target = parsing.pick_target(plan["targets"], available, area_infos,
                                      amount, exclude=config.EXCLUDE_AREA_KEYWORD,
-                                     balanced=plan.get("balanced", False))
+                                     balanced=plan.get("balanced", False),
+                                     matched_keys=plan.get("matched_keys"),
+                                     target=plan.get("target_price"))
         if not target:
             open_now = parsing.sale_open(product_infos)
             if open_now:
@@ -260,6 +262,17 @@ def build_plan(session, event_id: str) -> dict | None:
     order = " > ".join(parsing.target_label(a, p) for a, p in targets)
     print(f"[PLAN] {kind}活動，優先序: {order}")
 
+    # 關鍵字全沒中時要靠「目標價位」算期望值（使用者習慣把價位打在最後一順位）。
+    # 兩個都是靜態資料，開賣前算好就行，不要放進每秒 20 次的熱路徑。
+    units = areas if areas else products
+    price_target = parsing.target_price(config.AREA_KEYWORD, units)
+    matched_keys = parsing.keyword_hit_keys(products, areas,
+                                            keyword=config.AREA_KEYWORD,
+                                            exclude=config.EXCLUDE_AREA_KEYWORD)
+    if price_target and not strict:
+        print(f"[PLAN] 目標價位 {price_target:.0f}（從關鍵字最後一組認出）—— "
+              f"關鍵字沒中的票區改用「離這個價位多近」算期望值")
+
     _warn_if_serial_required(session, session_id, targets)
     _warn_if_lottery(session, event_id)
 
@@ -270,6 +283,7 @@ def build_plan(session, event_id: str) -> dict | None:
     # 多帶 id 不用多送請求（本來就是一發查全部），純賺。
     return {"session": sess, "session_id": session_id, "targets": targets,
             "amount": int(config.TICKET_AMOUNT or 1), "balanced": not strict,
+            "matched_keys": matched_keys, "target_price": price_target,
             "poll_products": [p["productId"] for p in products],
             "poll_areas": [a["ticketAreaId"] for a in areas]}
 

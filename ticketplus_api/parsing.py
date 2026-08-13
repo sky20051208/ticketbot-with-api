@@ -19,6 +19,10 @@ RANK_DECAY = 0.85
 # 「剩幾張才算不稀缺」。機率分 = count/(count+HALF)，HALF=4 時剩 4 張剛好 0.5。
 # 調小 → 更看重位置；調大 → 更看重數量。
 SUPPLY_HALF = 4.0
+# 超出目標價位的罰則指數。比目標便宜是線性折（位置差而已），比目標貴則是 (目標/價)^N ——
+# 買貴了客人可能不認那個差額、變成自己吃掉，比坐差一點嚴重。
+# **設成 1.0 就是「貴便宜一視同仁、只看偏離幅度」**。
+PRICE_OVER_PENALTY = 3.0
 
 
 def select_session(sessions: list[dict], date_keyword: str = "") -> dict | None:
@@ -67,6 +71,93 @@ def _keyword_groups(keyword: str) -> list[list[str]]:
 def _matches(item: dict, subs: list[str]) -> bool:
     haystack = f"{item.get('name', '')} {item.get('price', '')}"
     return all(s in haystack for s in subs)
+
+
+def _price(item: dict) -> float | None:
+    try:
+        v = float(item.get("price"))
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def target_price(keyword: str, units: list[dict]) -> float | None:
+    """從 AREA_KEYWORD 認出「目標價位」—— 使用者的習慣是**把價位打在最後一順位**
+    （例：`搖滾A;搖滾B;6800`）。回 None = 沒打價位，一切照舊。
+
+    只認純數字的那一組（`綠517`、`G05` 這種帶字母的不算），有多組就取最後一組。
+    還會拿這場真實的價格區間做健檢：離譜的數字（多半是把區號當價位）直接不採用，
+    免得把「517 排」誤讀成 517 元。
+    """
+    nums = [float(s) for subs in _keyword_groups(keyword) for s in subs
+            if s.isdigit() and 100 <= float(s) <= 100000]
+    if not nums:
+        return None
+    guess = nums[-1]
+    prices = [p for p in (_price(u) for u in units) if p]
+    if not prices:
+        return guess
+    lo, hi = min(prices) * 0.5, max(prices) * 2
+    if not lo <= guess <= hi:
+        print(f"[PARSE] 關鍵字裡的 {guess:.0f} 不在這場的票價範圍 "
+              f"({min(prices):.0f}~{max(prices):.0f})，**不當成目標價位**（當一般關鍵字用）")
+        return None
+    return guess
+
+
+def price_affinity(price: float | None, target: float | None) -> float:
+    """票價跟目標價位的契合度，0~1。目標價位本身 = 1.0。
+
+    刻意不對稱（見 PRICE_OVER_PENALTY）：
+        目標 6800 →  6500: 0.96   3800: 0.56   1800: 0.26
+                     8800: 0.46  12000: 0.18   ← 同樣偏離幅度，貴的罰更重
+    """
+    if not target or not price:
+        return 1.0
+    ratio = price / target
+    if ratio <= 1.0:
+        return ratio                                   # 便宜：位置差而已，線性折
+    return (1.0 / ratio) ** PRICE_OVER_PENALTY         # 超價：罰重
+
+
+def keyword_hit_keys(products: list[dict], areas: list[dict], keyword: str = "",
+                     exclude: str = "") -> set:
+    """哪些「票區（或無劃位活動的票種）」是關鍵字命中的 → 回它們的 key。
+
+    key 跟 `_area_ranks` 是同一套，所以 `pick_target` 能用它分辨
+    「這個是使用者明講要的」還是「只是備胎」——兩者的想要程度算法不同。
+    """
+    units = areas if areas else products
+    id_key = "ticketAreaId" if areas else "productId"
+    excludes = [e.strip() for e in (exclude or "").split(";") if e.strip()]
+    groups = _keyword_groups(keyword)
+    if not groups:
+        return set()
+    return {u[id_key] for u in units
+            if not any(e in str(u.get("name", "")) for e in excludes)
+            and any(_matches(u, subs) for subs in groups)}
+
+
+def desirability(rank_index: int, matched: bool, n_matched: int,
+                 price: float | None, target: float | None) -> float:
+    """「想要程度」。命中關鍵字的照使用者排的順序；**沒中的改用價位契合度**。
+
+    為什麼要分開算：關鍵字全沒中時，`rest` 是照官方 `sortedIndex` 排的 —— 那個順序
+    跟使用者的意圖沒有關係，名次衰減套上去只是在「隨便一個順序」上加權。價位不一樣，
+    它是每個票區都有、而且連續的訊號，使用者打的價位就是他真正的目標。
+
+    沒中的一律先退到「命中的那幾個後面」當同一階（`RANK_DECAY^n_matched`），
+    再由價位契合度連續拉開差距。效果（2 個命中、目標價位 6800）：
+        命中第 1 順位              1.00
+        命中第 2 順位              0.85
+        沒中但剛好 6800            0.72   ← 舊做法若它排第 50，只有 0.0003，等於永遠選不到
+        沒中且 3800                0.40
+        沒中且 12000               0.13
+    沒打價位（target=None）時退回原本的 `RANK_DECAY^名次`，行為完全不變。
+    """
+    if matched or target is None:
+        return RANK_DECAY ** rank_index
+    return (RANK_DECAY ** n_matched) * price_affinity(price, target)
 
 
 def _rank(items: list[dict], keyword: str, exclude: str, strategy: str,
@@ -216,23 +307,21 @@ def _supply(info: dict, limit_key: str) -> int | None:
     return int(info.get("count") or 0)
 
 
-def score_target(rank_index: int, product_info: dict,
+def score_target(desire: float, product_info: dict,
                  area_info: dict | None) -> tuple[float, int | None]:
     """寬鬆清票的期待值分數 = **想要程度 × 搶到機率**。回 (分數, 可見庫存)。
 
     我們看得到的只有價格、區域、剩餘數量，所以兩項都只能從這裡推：
 
-    想要程度 = `RANK_DECAY ** 名次`
-        名次就是使用者自己排的優先序（關鍵字命中 → 再照 AREA_AUTO_SELECT_MODE
-        的貴到便宜 / 便宜到貴）。0.85 → 第 5 志願 0.44、第 10 志願 0.20，
-        排很後面的爛位置自然趨近 0。
+    想要程度 = `desirability()` 算好傳進來
+        命中關鍵字 → 使用者排的名次；沒中 → 跟他打的目標價位有多接近。
 
     搶到機率 = `count / (count + SUPPLY_HALF)`
         對手人數未知，但**同一場同一刻對每個票區大致相同**，所以機率正比於庫存。
         用飽和曲線而不是線性：1 張變 8 張是天壤之別，50 張變 100 張沒差。
         剩 1 張→0.20、4 張→0.50、20 張→0.83、不限量→1.00。
 
-    效果（RANK_DECAY=0.85, SUPPLY_HALF=4）：
+    效果（SUPPLY_HALF=4）：
         第 1 志願剩 1 張   1.00×0.20 = 0.20
         第 2 志願剩 30 張  0.85×0.88 = 0.75  ← 選這個
         第 6 志願剩 100 張 0.44×0.96 = 0.42  ← 不會為了量大跳到爛位置
@@ -250,7 +339,7 @@ def score_target(rank_index: int, product_info: dict,
                 if s is not None]
     supply = min(supplies) if supplies else None
     abundance = 1.0 if supply is None else supply / (supply + SUPPLY_HALF)
-    return (RANK_DECAY ** rank_index) * abundance, supply
+    return desire * abundance, supply
 
 
 def _buyable(area: dict | None, product: dict, product_infos: dict,
@@ -284,17 +373,22 @@ def _area_ranks(targets: list[tuple[dict | None, dict]]) -> dict:
 
 def pick_target(targets: list[tuple[dict | None, dict]],
                 product_infos: dict, area_infos: dict,
-                amount: int, exclude: str = "",
-                balanced: bool = False) -> tuple[dict | None, dict, int] | None:
+                amount: int, exclude: str = "", balanced: bool = False,
+                matched_keys: set | None = None,
+                target: float | None = None) -> tuple[dict | None, dict, int] | None:
     """挑一個「真的買得到」的票種。回 (area or None, product, count) 或 None。
 
     `balanced=False`（嚴格清票，或使用者要照自己排的順序）→ **取優先序裡第一個買得到的**。
     `balanced=True`（寬鬆清票）→ 取 `score_target` 分數最高的，也就是在
     「最期待的位置」跟「最可能搶到」之間取平衡。
 
+    `matched_keys` / `target`（目標價位）由 `build_plan` 算好傳進來，用途見
+    `desirability()`：關鍵字全沒中時改用價位契合度，而不是在官方排序上硬套名次衰減。
+
     count 會依 purchaseLimit 夾到上限（超買必被打回，寧可少買也不要整發作廢）。
     """
     excludes = [e.strip() for e in (exclude or "").split(";") if e.strip()]
+    matched_keys = matched_keys or set()
 
     if not balanced:
         for area, product in targets:
@@ -309,6 +403,7 @@ def pick_target(targets: list[tuple[dict | None, dict]],
         return None
 
     ranks = _area_ranks(targets)
+    n_matched = len(matched_keys)
     best = None
     for area, product in targets:
         got = _buyable(area, product, product_infos, area_infos, amount, excludes)
@@ -316,18 +411,26 @@ def pick_target(targets: list[tuple[dict | None, dict]],
             continue
         info, area_info, count = got
         key = area.get("ticketAreaId") if area is not None else product.get("productId")
-        score, supply = score_target(ranks[key], info, area_info)
+        matched = key in matched_keys
+        price = _price(area if area is not None else product)
+        desire = desirability(ranks[key], matched, n_matched, price, target)
+        score, supply = score_target(desire, info, area_info)
         if best is None or score > best[0]:
-            best = (score, ranks[key], supply, area, product, count)
+            best = (score, ranks[key], matched, price, supply, area, product, count)
 
     if best is None:
         return None
-    score, rank_index, supply, area, product, count = best
+    score, rank_index, matched, price, supply, area, product, count = best
     if count < amount:
         info = product_infos.get(product.get("productId")) or {}
         print(f"[PARSE] {target_label(area, product)} 每單上限 "
               f"{info.get('purchaseLimit')} 張，{amount} → {count}")
+    if matched or target is None:
+        why = f"第 {rank_index + 1} 志願"
+    else:
+        why = (f"關鍵字沒中，價位 {price:.0f} vs 目標 {target:.0f}"
+               f"（契合度 {price_affinity(price, target):.2f}）")
     print(f"[PARSE] 寬鬆清票選擇: {target_label(area, product)}"
-          f"（第 {rank_index + 1} 志願，剩 {'不限量' if supply is None else f'{supply} 張'}"
+          f"（{why}，剩 {'不限量' if supply is None else f'{supply} 張'}"
           f"，分數 {score:.2f}）")
     return area, product, count
