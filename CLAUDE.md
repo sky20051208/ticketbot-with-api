@@ -65,7 +65,7 @@ iv `!@#$FETIXEVENTiv`（前端 bundle 模組 9263 硬寫的），見 [crypto.py]
 | [ticketplus_api/__init__.py](ticketplus_api/__init__.py) | 四組 API base URL 常數（CONFIG / QUEUE / TICKET / USER） |
 | [ticketplus_api/crypto.py](ticketplus_api/crypto.py) | id 加解密（診斷用，主線用不到；`cryptography` 走 lazy import） |
 | [ticketplus_api/session.py](ticketplus_api/session.py) | curl_cffi session、XHR headers、`extract_token`、暖機、`make_keepalive`（主執行緒續命 callback） |
-| [ticketplus_api/catalog.py](ticketplus_api/catalog.py) | 唯讀 API：S3 靜態目錄（sessions/ticketAreas/products）+ 即時票況 `/get`；`InfoPoller` 併行偵測（見下）。**都不需要登入** |
+| [ticketplus_api/catalog.py](ticketplus_api/catalog.py) | 唯讀 API：S3 靜態目錄（sessions/ticketAreas/products）+ 即時票況 `/get`、`get_session_info`（場次層）/ `get_event_info`（活動層，查 `isLottery`）；`InfoPoller` 併行偵測（見下）。**都不需要登入** |
 | [ticketplus_api/parsing.py](ticketplus_api/parsing.py) | 純挑選邏輯（零 HTTP）：挑場次、票區優先序、可買判斷、`pick_target` |
 | [ticketplus_api/reserve.py](ticketplus_api/reserve.py) | 送單：`enqueue`（排隊拿 uuid）→ `reserve`（換 orderId）。**唯一需要 token 的地方** |
 | [ticketplus_api/browser_session.py](ticketplus_api/browser_session.py) | nodriver：登入抓 token、搶到後導向訂單頁。沒有 /login 路由（登入是 dialog），開活動頁等 `user` cookie 出現 |
@@ -93,7 +93,43 @@ DevTools → Application → Cookies → `user`。`extract_token()` 吃整串 co
 - **多開時總速率是 N 倍**：0.05s × 5 個 instance = 100 req/s。`catalog.py` 只實測過
   單 IP 12 req/s 不被擋，再往上沒驗證過，多開請自己乘回去或分 IP
 
+**登記抽選（`isLottery`）—— 開搶前一定要先看的旗標**：TicketPlus 有兩種活動，
+一般搶票（先搶先贏）跟**登記抽選**（登記完隨機抽）。抽選那種**搶再快都沒用**，
+官方公告原文「將根據登記訂單進行隨機抽選」。判斷方式（`catalog.get_event_info()`，
+一發請求、不需登入、開賣前就查得到）：
+```
+GET {CONFIG_API}/get?eventId=<明文 eventId>   →  result.event.isLottery
+  e000001417（AKASAKI 登記抽選）→ isLottery=True
+  e000001329 / Vaundy（一般搶票）→ 根本沒這個欄位
+```
+- **不要拿 `lotteryDeadline` 判斷** —— 一般活動也有，那是付款期限，不是抽選旗標
+- 前端是看 `campaign.isLottery` 切整套 UI（語系檔有 35 條 `_lottery`：立即登記 /
+  排隊登記中 / 您的登記已完成），`campaign` 就是這支 API 回的東西
+- `build_plan` 會警告但**照樣跑**（登記還是得登記），只是別為這種場次多開 IP 或調快間隔
+
 **其他踩點**：
+- **`consecutiveSeats` 永遠送 false，這不是選項**：官方 `enquene()` 是硬寫的
+  `s.reserveSeats=!0, s.consecutiveSeats=!1, "1"===seatReserve && (s.finalizedSeats=!0)`。
+  即時票況裡開賣後才出現的 `onlyConsecutive` **前端從頭到尾沒讀過**（全站 js 零命中），
+  所以不用管它。結帳頁那個 `consecutiveSeats` 是拿到座位後**事後**檢查連不連號
+  （`isConsecutive()`）好決定要不要跳「座位不相連」提示，跟送單參數無關
+- **實名制的 `applicants`（身分證/姓名/國籍）不在 reserve 裡**：是拿到 orderId 之後在
+  結帳頁填的（`session.applicants.properties.*` 驅動表單）。所以我們送單不用帶，
+  但要提醒客人**15 分鐘內**得填完，實名制場次尤其花時間
+- **enqueue 回 137 但沒給 `waitSecond` 時不能放棄**：官方 `enquene()` 自己只認
+  `n.waitSecond`，給不出秒數就轉 `errorHandler`，那裡的 137 分支是
+  `1e3 * (e.waitSecond || this.defaultWaitSec)`、`defaultWaitSec: 15` —— 也就是官方
+  會繼續排。已對齊（`reserve.enqueue(default_wait=15)`）
+- **排隊沒有「順序 / 位置 / 剩幾人」這種東西**：全站 js 對 `queuePosition` / `rank` /
+  `estimate` 零命中，官方自己也看不到，所以任何「查排隊名次」的想法都不用試
+- **`localCheck` = 伺服器叫前端自己重查票況再決定要不要繼續排**（不是錯誤）。官方收到
+  它會 `isRefresh=true` → `refreshTicket()` → 重打票況，票沒了就自產 errCode 121。
+  我們的做法是直接重排一次，等價
+- **網路上流傳的「honeypot sessionId」是誤判**：bouob/tickets_hunter 硬寫
+  `c18900a1d5f295218fe60b982d7ece96` 說遠大會對被抓到的 bot 回假資料。實查
+  = `s000001729`，saleStart 2026-05-13 / `exposeEnd` 2026-06-01 / status `soldout`
+  的**真實過期活動**，只是不在 sitemap 裡了。對方的 date fallback 撿到殘留場次而已，
+  **不用為此做任何防禦**
 - **兩種活動，票種掛的位置完全不同**（2026-07-29 踩過，無劃位的活動被誤判成沒票）：
   `session.ticketArea=True` → ticketAreas.json 有內容、票種帶 `ticketAreaId`，關鍵字比對票區名；
   `session.ticketArea=False` → **ticketAreas.json 是空陣列**、票種身上沒有 `ticketAreaId` 欄位，

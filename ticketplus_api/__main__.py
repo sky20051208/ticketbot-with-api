@@ -252,8 +252,28 @@ def build_plan(session, event_id: str) -> dict | None:
     print(f"[PLAN] {kind}活動，優先序: {order}")
 
     _warn_if_serial_required(session, session_id, targets)
+    _warn_if_lottery(session, event_id)
     return {"session": sess, "session_id": session_id, "targets": targets,
             "amount": int(config.TICKET_AMOUNT or 1)}
+
+
+def _warn_if_lottery(session, event_id: str):
+    """「登記抽選」活動要先講清楚 —— 那種活動搶快沒有意義。
+
+    TicketPlus 有兩種完全不同的活動：一般搶票（先搶先贏）跟**登記抽選**
+    （`campaign.isLottery`，前端整套 UI 換成「立即登記 / 排隊登記中 / 您的登記已完成」）。
+    抽選是登記完之後隨機抽，官方公告原文寫「將根據登記訂單進行隨機抽選」——
+    所以倒數 0.4 秒、併行偵測、每秒 20 發，對中籤率一點幫助都沒有。
+
+    照樣讓它跑（登記還是得登記，而且登記本身也有名額/時間限制），只是要讓使用者知道
+    「沒搶到不是 bot 慢」，也不用為了這種活動去多開 IP。
+    """
+    info = catalog.get_event_info(session, crypto.decrypt_id(event_id))
+    if not info.get("isLottery"):
+        return
+    print("[PLAN] ⚠ 這是**登記抽選**活動（isLottery=True），不是先搶先贏 —— "
+          "官方是「根據登記訂單隨機抽選」")
+    print("[PLAN]   照常幫你送出登記，但**搶快不會提高中籤率**，不用為這場多開 IP 或調快間隔")
 
 
 def _warn_if_serial_required(session, session_id: str, targets):

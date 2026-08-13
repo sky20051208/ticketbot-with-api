@@ -57,6 +57,32 @@ def get_session_info(session: cf_requests.Session, session_id: str) -> dict:
     return sessions[0] if sessions else {}
 
 
+def get_event_info(session: cf_requests.Session, event_id: str) -> dict:
+    """查活動層設定。event_id 要**明文**（e000001417），加密的先用 `crypto.decrypt_id()` 轉。
+
+    目前只為了一個欄位：**`isLottery`**。TicketPlus 有一種「登記抽選」活動，前端整套
+    UI 都換掉（語系檔有 35 條 `_lottery` 字串：立即登記 / 排隊登記中 / 您的登記已完成），
+    判斷依據就是 `campaign.isLottery`，而 campaign 就是這支 API 回的東西。
+
+    對 bot 來說這是**最重要的一個旗標**：抽選活動是「登記完之後隨機抽」
+    （AKASAKI 那場的公告原文：「將根據登記訂單進行隨機抽選」），送單快 40 毫秒
+    完全不影響中籤率。實測正負樣本：
+      e000001417（AKASAKI 登記抽選）→ isLottery=True
+      e000001329（一般搶票活動）    → 根本沒有這個欄位
+
+    **注意不要跟 `lotteryDeadline` 搞混** —— 那個一般活動也有，是別的東西（付款期限），
+    不能拿來判斷。
+    """
+    data = _get_json(session, f"{CONFIG_API}/get?eventId={event_id}&")
+    if data.get("errCode") not in ("00", None):
+        print(f"[INFO] 活動設定查詢 errCode={data.get('errCode')}")
+        return {}
+    result = (data.get("result") or {}).get("event") or data.get("result") or {}
+    if isinstance(result, list):
+        result = result[0] if result else {}
+    return result if isinstance(result, dict) else {}
+
+
 def fetch_catalog(session: cf_requests.Session, event_id: str) -> dict:
     """抓活動的靜態目錄。event_id 用**網址上那串加密 id**。
     回 {"sessions": [...], "ticketAreas": [...], "products": [...]}，抓不到的鍵給空 list。"""

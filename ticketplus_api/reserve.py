@@ -107,12 +107,19 @@ def _post(session: cf_requests.Session, url: str, payload: dict, token: str,
 
 
 def enqueue(session: cf_requests.Session, payload: dict, token: str,
-            max_wait: float = 300.0) -> dict:
+            max_wait: float = 300.0, default_wait: float = 15.0) -> dict:
     """排隊直到拿到 uuid。回 {"uuid": …} / {"currentReservedOrderId": …} / {"error": …}。
 
     errCode 不是 "00" 時：
       waitSecond → 官方叫我們等 N 秒再排（照做，硬打只會被推更後面）
       localCheck → 叫前端重新確認票況（我們當作「再排一次」）
+      137 但沒給 waitSecond → 等 `default_wait` 再排，**不能放棄**
+
+    最後那條是照官方 `errorHandler` 補的：`enquene()` 自己只認 `n.waitSecond`，
+    給不出秒數就轉進 errorHandler，而那裡的 137 分支是
+    `setTimeout(…, 1e3 * (e.waitSecond || this.defaultWaitSec))`、`defaultWaitSec: 15`。
+    也就是說**官方前端在這種情況會繼續排，我們原本卻直接收工**——尖峰時真的發生就是
+    白白讓掉一張票。
     """
     started = time.monotonic()
     deadline = started + max_wait
@@ -139,6 +146,10 @@ def enqueue(session: cf_requests.Session, payload: dict, token: str,
         elif data.get("localCheck"):
             print(f"[ENQUEUE] ⏳ 排隊中… 官方要求重新確認票況（第 {attempt} 次）")
             time.sleep(0.5)
+        elif str(data.get("errCode")) in QUEUE_WAIT_CODES:
+            print(f"[ENQUEUE] ⏳ 排隊中… 官方沒給秒數，比照前端 defaultWaitSec 等 "
+                  f"{default_wait:.0f}s（第 {attempt} 次，已排 {waited:.1f}s）")
+            time.sleep(default_wait)
         else:
             return {"error": f"errCode={data.get('errCode')} {describe(data.get('errCode'))}"}
     return {"error": f"排隊超過 {max_wait}s 未輪到"}
