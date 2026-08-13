@@ -44,7 +44,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from ticketplus_api import CONFIG_API, QUEUE_API, TICKET_API, catalog, crypto, parsing
+from ticketplus_api import QUEUE_API, TICKET_API, USER_API, catalog, crypto, parsing
 from ticketplus_api.session import (build_headers, build_session, describe_token,
                                     extract_token, warmup_queue, warmup_session)
 
@@ -127,6 +127,22 @@ def watch_status(session, product_ids, area_ids, stop_evt, found, secs_to_t0):
         time.sleep(_poll_gap(secs_to_t0()))
 
 
+def check_token(session, token: str):
+    """開賣前先確認 token 真的有效。打 getMaskedUserInfo（唯讀、不碰排隊也不下單），
+    **只印 errCode 不印回傳內容** —— 那裡面是會員個資。"""
+    headers = {**build_headers(), "Authorization": f"Bearer {token}"}
+    try:
+        res = session.get(f"{USER_API}/getMaskedUserInfo", headers=headers, timeout=15)
+        code = str(res.json().get("errCode"))
+    except Exception as e:
+        log("CHECK", f"連不上: {type(e).__name__}")
+        return
+    if code == "00":
+        log("CHECK", f"✅ token 有效（{describe_token(token)}）—— 可以開跑")
+    else:
+        log("CHECK", f"❌ token 無效 errCode={code} —— 回瀏覽器重新複製一份 `user` cookie")
+
+
 def _ping_queue(session):
     """安靜地把 queue 網域的連線 ping 熱。實測這個網域**新建一條連線第一發要 ~2.1s**，
     提早開跑的話連線早就閒置斷了，T-0 那發會整個吃掉那 2.1s，實驗就白做了。"""
@@ -183,6 +199,11 @@ def main():
     ap.add_argument("--keyword", default="", help="票區關鍵字，空 = 用預設優先序第一個")
     ap.add_argument("--amount", type=int, default=1)
     ap.add_argument("--token", default="", help="access_token / 整串 user cookie")
+    ap.add_argument("--token-file", default="",
+                    help="改從檔案讀 token。**建議用這個** —— cookie 字串裡有 %% { } \" ，"
+                         "直接貼命令列很容易被 shell 吃掉")
+    ap.add_argument("--check", action="store_true",
+                    help="只驗 token 有沒有效就結束（開賣前先跑這個確認，不會排隊）")
     ap.add_argument("--timeout", type=float, default=180.0, help="最久排多久就放棄")
     ap.add_argument("--reserve", action="store_true",
                     help="拿到 uuid 後**真的下單**（會產生 15 分鐘保留訂單）。預設不下單")
@@ -192,13 +213,26 @@ def main():
     if args.list:
         show_sessions(session, args.event)
         return
-    if not args.session or not args.token:
-        raise SystemExit("[ERR] 要 --session 和 --token（先用 --list 查場次）")
 
-    token = extract_token(args.token)
+    raw = args.token
+    if args.token_file:
+        # utf-8-sig：PowerShell 的 Out-File / 記事本存檔都會加 BOM，用 utf-8 讀會在
+        # 字串最前面多一個 ﻿，token 就解不出來了（很難看出來的那種錯）
+        with open(args.token_file, "r", encoding="utf-8-sig") as f:
+            raw = f.read().strip()
+    if not raw:
+        raise SystemExit("[ERR] 要 --token 或 --token-file")
+    token = extract_token(raw)
     if not token:
-        raise SystemExit("[ERR] --token 解不出 access_token")
+        raise SystemExit("[ERR] 解不出 access_token —— 要貼 DevTools → Application → "
+                         "Cookies → `user` 那一格的值（不是 Network 看到的 request cookie）")
     log("INIT", f"token: {describe_token(token)}")
+
+    if args.check:
+        check_token(session, token)
+        return
+    if not args.session:
+        raise SystemExit("[ERR] 要 --session（先用 --list 查場次）")
 
     data = catalog.fetch_catalog(session, args.event)
     match = [s for s in data["sessions"]
