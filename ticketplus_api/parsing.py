@@ -19,6 +19,10 @@ RANK_DECAY = 0.85
 # 「剩幾張才算不稀缺」。機率分 = count/(count+HALF)，HALF=4 時剩 4 張剛好 0.5。
 # 調小 → 更看重位置；調大 → 更看重數量。
 SUPPLY_HALF = 4.0
+# **同價位**內，官方排序（sortedIndex，通常就是離舞台遠近）每往後一位打的折。
+# 刻意設得很弱：場館把這些區定成同一個價，本身就代表它們差不多 —— 這只是拿來破同分，
+# 不該蓋過真實的張數差距。設 1.0 = 同價位完全不分先後（純看張數）。
+TIER_DECAY = 0.97
 # 超出目標價位的罰則指數。比目標便宜是線性折（位置差而已），比目標貴則是 (目標/價)^N ——
 # 買貴了客人可能不認那個差額、變成自己吃掉，比坐差一點嚴重。
 # **設成 1.0 就是「貴便宜一視同仁、只看偏離幅度」**。
@@ -139,7 +143,8 @@ def keyword_hit_keys(products: list[dict], areas: list[dict], keyword: str = "",
 
 
 def desirability(rank_index: int, matched: bool, n_matched: int,
-                 price: float | None, target: float | None) -> float:
+                 price: float | None, target: float | None,
+                 tier_rank: int = 0) -> float:
     """「想要程度」。命中關鍵字的照使用者排的順序；**沒中的改用價位契合度**。
 
     為什麼要分開算：關鍵字全沒中時，`rest` 是照官方 `sortedIndex` 排的 —— 那個順序
@@ -154,10 +159,16 @@ def desirability(rank_index: int, matched: bool, n_matched: int,
         沒中且 3800                0.40
         沒中且 12000               0.13
     沒打價位（target=None）時退回原本的 `RANK_DECAY^名次`，行為完全不變。
+
+    `tier_rank` = **同價位內**的官方排序名次，用來破同分：同一個價位的票區價位契合度
+    完全一樣，少了這一項的話「藍1A~藍1E」想要度會一模一樣，誰被選中就 100% 由張數決定，
+    結果常常挑到同價位裡位置最差的那一區。用 TIER_DECAY 而不是 RANK_DECAY 是因為
+    這是弱訊號（同價 = 場館認為它們差不多），不該蓋過真實的張數差距。
     """
     if matched or target is None:
         return RANK_DECAY ** rank_index
-    return (RANK_DECAY ** n_matched) * price_affinity(price, target)
+    return ((RANK_DECAY ** n_matched) * price_affinity(price, target)
+            * (TIER_DECAY ** tier_rank))
 
 
 def _rank(items: list[dict], keyword: str, exclude: str, strategy: str,
@@ -361,6 +372,21 @@ def _buyable(area: dict | None, product: dict, product_infos: dict,
     return info, area_info, count
 
 
+def _tier_ranks(targets: list[tuple[dict | None, dict]]) -> dict:
+    """{key: 同價位內的名次}。同價位的票區排序（官方 sortedIndex）就是位置好壞，
+    但它是弱訊號 —— 場館把它們定成同一個價，本來就代表差不多。只拿來破同分。"""
+    seen_per_price, ranks = {}, {}
+    for area, product in targets:
+        unit = area if area is not None else product
+        key = area.get("ticketAreaId") if area is not None else product.get("productId")
+        if key in ranks:
+            continue
+        price = _price(unit)
+        ranks[key] = seen_per_price.get(price, 0)
+        seen_per_price[price] = ranks[key] + 1
+    return ranks
+
+
 def _area_ranks(targets: list[tuple[dict | None, dict]]) -> dict:
     """{票區 or 票種 key: 名次}。**同一票區底下的票種共用同一個名次** ——
     不然一個票區掛 3 個票種（全票/身障/陪同）就會白白把下一個票區推後 3 名。"""
@@ -403,6 +429,7 @@ def pick_target(targets: list[tuple[dict | None, dict]],
         return None
 
     ranks = _area_ranks(targets)
+    tiers = _tier_ranks(targets)
     n_matched = len(matched_keys)
     best = None
     for area, product in targets:
@@ -413,7 +440,8 @@ def pick_target(targets: list[tuple[dict | None, dict]],
         key = area.get("ticketAreaId") if area is not None else product.get("productId")
         matched = key in matched_keys
         price = _price(area if area is not None else product)
-        desire = desirability(ranks[key], matched, n_matched, price, target)
+        desire = desirability(ranks[key], matched, n_matched, price, target,
+                              tiers[key])
         score, supply = score_target(desire, info, area_info)
         if best is None or score > best[0]:
             best = (score, ranks[key], matched, price, supply, area, product, count)
