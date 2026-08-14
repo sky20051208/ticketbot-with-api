@@ -23,6 +23,20 @@ def taipei_now() -> datetime:
     return datetime.now(TAIPEI).replace(tzinfo=None)
 
 
+# 對時量到的「真實時鐘 − 本機時鐘」，由 TimeWatcher._apply_offset 更新。
+# 本機時鐘平常就會偏個幾百毫秒（2026-08-14 實測這台偏 282ms），而我們整條搶票鏈路
+# 都在拿 log 時間戳做毫秒級的事後分析 —— 時間戳沒校正的話，分析出來的數字全是歪的。
+CLOCK_OFFSET = timedelta(0)
+
+
+def corrected_now() -> datetime:
+    """對時後的台北時間。**log 時間戳要用這個**，不要用 `time.localtime()`。
+
+    `taipei_now()` 只修時區、不修時鐘誤差；這支兩個都修。還沒對時的話兩者相等。
+    """
+    return taipei_now() + CLOCK_OFFSET
+
+
 class TimeWatcher:
     def __init__(self, target_time_str, target_url, lead_seconds=0.9):
         self.target_time_str = target_time_str
@@ -135,6 +149,8 @@ class TimeWatcher:
     def _apply_offset(self, clock_offset):
         """把「伺服器/NTP 時鐘 − 本機時鐘」換算成 self.time_offset 的語意
         （真實台北牆上時間 − 機器牆上時間），回當下的台北時間。"""
+        global CLOCK_OFFSET
+        CLOCK_OFFSET = timedelta(seconds=clock_offset)   # 給 corrected_now() 用
         true_epoch = time.time() + clock_offset
         tw_now = datetime.fromtimestamp(true_epoch, TAIPEI).replace(tzinfo=None)
         self.time_offset = tw_now - datetime.fromtimestamp(time.time())

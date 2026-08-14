@@ -85,8 +85,14 @@ def _supported() -> list[tuple[str, str, str]]:
     usable = [p for p in _PROFILES if not names or p[0] in names] or [_PROFILES[-1]]
     dropped = len(_PROFILES) - len(usable)
     if dropped:
-        print(f"[SESSION] 這台的 curl_cffi 不支援其中 {dropped} 種指紋，"
-              f"可用 {len(usable)} 種（多開的區隔度會下降，升級 curl_cffi 可恢復）")
+        # 講清楚實際影響，不要讓人以為很嚴重：**真正決定 TLS 指紋的是「家族」不是版本號**
+        # —— 實測 chrome136/142/145/146 的 JA4 完全相同（t13d1516h2_8daaf6152771_…），
+        # 所以少掉幾個 Chrome 版本只是少幾組 User-Agent 字串，JA4 層的區隔度不變。
+        # 會真的撞號是在「帳號數 > 可用種數」的時候（ACC_ID % N 繞回去）。
+        families = len({p[1] for p in usable})
+        print(f"[SESSION] 這台的 curl_cffi 少 {dropped} 種指紋，可用 {len(usable)} 種 / "
+              f"{families} 個家族 —— 開到第 {len(usable) + 1} 個帳號才會開始撞號"
+              f"（同家族不同版本的 JA4 本來就一樣，升級主要是多幾組 UA）")
     _SUPPORTED_CACHE = usable
     return usable
 
@@ -296,7 +302,7 @@ def make_keepalive(session: cf_requests.Session, product_ids: list[str],
     最後 stop_before 秒停手，不讓網路 IO 影響倒數精度。"""
     url = f"{CONFIG_API}/get?productId={','.join(product_ids)}&"
     headers = build_headers()
-    state = {"last": 0.0, "queue_warmed": False}
+    state = {"last": 0.0}
 
     def _tick(remaining: float):
         if remaining <= stop_before:
@@ -312,11 +318,19 @@ def make_keepalive(session: cf_requests.Session, product_ids: list[str],
         except Exception as e:
             print(f"[KEEPALIVE] ping 失敗: {type(e).__name__}: {e}")
 
-        # queue 網域暖一次就夠 —— 之後每輪的票況 ping 會讓整個連線池保持活著。
-        # 放在票況 ping 之後，確保偵測那條連線優先。
-        if not state["queue_warmed"]:
-            state["queue_warmed"] = True
-            warmup_queue(session)
+        # **排隊網域也要每輪續命，不能只暖一次**（2026-08-14 正式搶票踩到）。
+        # 舊版寫「暖一次就夠，票況的 ping 會讓連線池保持活著」—— 那是錯的：
+        # 票況在 apis.ticketplus.com.tw、排隊在 queue.ticketplus.com.tw，**是兩個網域**，
+        # 而連線池是 per-host 的，ping 票況完全暖不到排隊那條。
+        # 實測後果：開場暖一次後閒置 3.5 分鐘就斷了，T-0 前的 warmup_queue 重建花 2203ms，
+        # 而它是擋在 poll_and_grab 前面同步跑的 —— 等於偵測比開賣還晚 1.6 秒開始，
+        # lead_seconds=0.4 整個白做還倒賠。
+        t0 = time.monotonic()
+        try:
+            session.get(f"{QUEUE_API}/", headers=headers, timeout=8)
+            print(f"[KEEPALIVE] 排隊連線續命 RTT {(time.monotonic() - t0) * 1000:.0f}ms")
+        except Exception as e:
+            print(f"[KEEPALIVE] 排隊 ping 失敗（不致命）: {type(e).__name__}")
 
     return _tick
 
@@ -330,7 +344,13 @@ def warmup_queue(session: cf_requests.Session):
     t0 = time.monotonic()
     try:
         res = session.get(f"{QUEUE_API}/", headers=build_headers(), timeout=5)
-        print(f"[WARMUP] 排隊網域已暖機 HTTP {res.status_code} "
-              f"（{(time.monotonic() - t0) * 1000:.0f}ms）")
+        ms = (time.monotonic() - t0) * 1000
+        print(f"[WARMUP] 排隊網域已暖機 HTTP {res.status_code}（{ms:.0f}ms）")
+        # 這支在開搶前是同步擋著 poll_and_grab 的。熱連線只要幾毫秒；一旦看到上千毫秒
+        # 就代表連線是冷的、倒數期間的 keepalive 沒把它續住 —— 那是直接吃掉 lead_seconds
+        # 的等級，一定要讓它在 log 裡刺眼。
+        if ms > 500:
+            print(f"[WARMUP] ⚠⚠ 排隊連線是冷的，剛剛花了 {ms / 1000:.1f} 秒重建 —— "
+                  f"偵測會比開賣晚這麼多才開始，檢查倒數期間的 [KEEPALIVE] 排隊連線續命")
     except Exception as e:
         print(f"[WARMUP] 排隊網域暖機失敗（不致命）: {type(e).__name__}")

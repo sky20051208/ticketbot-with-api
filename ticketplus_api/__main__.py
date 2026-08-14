@@ -24,7 +24,7 @@ import nodriver as uc
 
 import config
 import proxy_pool
-from timeWatcher import TimeWatcher
+from timeWatcher import TimeWatcher, corrected_now
 from tixcraftapi import alerts
 from LineBot import line_push
 
@@ -65,9 +65,10 @@ def _install_log_timestamp():
         if args and isinstance(args[0], str):
             head = args[0].lstrip()
             if head.startswith("[") and not any(head.startswith(p) for p in SKIP):
-                now = time.time()
-                ts = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
-                args = (f"[{ts}] {args[0]}", *args[1:])
+                # 用對時後的時間，不要用 time.localtime() —— 本機時鐘平常就偏幾百毫秒
+                # （2026-08-14 實測這台偏 282ms），而開賣前後的分析全靠這些時間戳，
+                # 沒校正的話整份 log 讀起來會比實際早，看不出真正的延遲。
+                args = (f"[{corrected_now():%H:%M:%S.%f}"[:-3] + f"] {args[0]}", *args[1:])
         _orig(*args, **kwargs)
 
     builtins.print = _stamped
@@ -106,7 +107,8 @@ async def _resolve_token(event_id: str):
     return token, None, None
 
 
-def poll_and_grab(session, plan: dict, token: str, poller) -> dict:
+def poll_and_grab(session, plan: dict, token: str, poller,
+                  opened_at: float | None = None) -> dict:
     """無限清票直到搶到 / 致命錯誤 / 使用者 STOP。冷卻節奏借鑑拓元 FSM：
       - **未開賣**（沒有任何票種 onsale，等 T-0）→ 全速輪詢（golden，不冷卻）
       - **有可買票** → 立刻送單（golden，永不冷卻，第一拍黃金時間）
@@ -121,15 +123,21 @@ def poll_and_grab(session, plan: dict, token: str, poller) -> dict:
     回 {"orderId": …} 或 {"error": …, "fatal": True}。"""
     poller.warm()      # 走過倒數的話已經暖好了，這裡是 no-op
     try:
-        return _grab_loop(session, poller, plan, token, plan["amount"])
+        return _grab_loop(session, poller, plan, token, plan["amount"], opened_at)
     finally:
         poller.close()
 
 
-def _grab_loop(session, poller, plan: dict, token: str, amount: int) -> dict:
+def _grab_loop(session, poller, plan: dict, token: str, amount: int,
+               opened_at: float | None = None) -> dict:
     """`session` 是**主執行緒**那條（queue 網域已暖），送單一定要用它 ——
-    偵測走 poller 的 worker 連線，但 enqueue/reserve 不能借那些 thread。"""
-    started = time.monotonic()
+    偵測走 poller 的 worker 連線，但 enqueue/reserve 不能借那些 thread。
+
+    `opened_at` = 倒數結束（≈ 開賣）那一刻的 monotonic。**偵測耗時要從這裡算起**，
+    不能從本函式進來才起算 —— 2026-08-14 就是因為從這裡起算，把 T-0 前那 2.2 秒的
+    排隊連線重建整個藏起來，log 印「開搶後 0.1s 偵測到票」，實際上是開賣後 1.9 秒。
+    """
+    started = opened_at if opened_at is not None else time.monotonic()
     cooldown: dict[str, float] = {}   # per 票種：售完/被搶走後的清票冷卻
     attempt = 0
     log = _PollLog()
@@ -172,7 +180,8 @@ def _grab_loop(session, poller, plan: dict, token: str, amount: int) -> dict:
         log.flush()
         print(f"[GRAB] 目標: {label} ${product.get('price')} × {count} 張"
               f"{'（系統配位）' if seat else ''}"
-              f" — 開搶後 {detect_s:.1f}s 偵測到票（第 {attempt} 輪，票況 RTT {rtt:.0f}ms）")
+              f" — **開賣後 {detect_s:.2f}s** 才送出（含暖機等所有前置，"
+              f"第 {attempt} 輪，票況 RTT {rtt:.0f}ms）")
 
         payload = tp_reserve.build_payload(product["productId"], count,
                                            seat_assignment=seat,
@@ -420,13 +429,16 @@ async def main_async():
         await watcher.wait_for_open_async(on_tick=_tick)
     else:
         print("[TIMER] 定時啟動已關閉，直接開搶")
+    # 倒數結束的這一刻 ≈ 開賣。之後每一步（換 token、暖連線、偵測）都算在延遲裡，
+    # 所以要在這裡取時間，不能等進了 poll_and_grab 才取。
+    opened_at = time.monotonic()
 
     token = await _refresh_token_if_stale(token, tab)
     # 開搶前最後一步：確保 queue 網域的連線是熱的（實測省約 5ms，不多但免費）。
     # 倒數期間 keepalive 已經暖過一次，這裡再確認一次，順便涵蓋
     # 「關掉定時啟動、直接開搶」那條路 —— 那條完全不會走 make_keepalive。
     warmup_queue(session)
-    outcome = poll_and_grab(session, plan, token, poller)
+    outcome = poll_and_grab(session, plan, token, poller, opened_at)
 
     if outcome.get("orderId"):
         alerts.play_checkout()
