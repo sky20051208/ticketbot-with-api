@@ -381,10 +381,32 @@ async def init_instances(req: InitReq):
 
 @app.put("/api/instances/{id}/config")
 async def update_config(id: int, cfg: InstanceConfig):
+    """改欄位時前端會呼叫這支，但**只更新記憶體**，不落地。
+    要寫進 profiles/acc_N/config.json 得走 /save（或按 START，那條會順便存）。"""
     if id not in instances:
         raise HTTPException(404)
     instances[id].config = cfg
     return {"ok": True}
+
+
+class SaveReq(BaseModel):
+    screen_w: int = 1920
+    screen_h: int = 1040
+
+
+@app.post("/api/instances/{id}/save")
+async def save_only(id: int, req: SaveReq):
+    """只存設定、不啟動。
+
+    以前只有 START 會呼叫 save_config，所以「設定好但先不跑」根本沒辦法留下來 ——
+    關掉瀏覽器就沒了，也沒辦法給外部工具（例如 bench_ticketplus_prefire.py）讀。
+    """
+    if id not in instances:
+        raise HTTPException(404)
+    inst = instances[id]
+    tile = compute_tile(id, len(instances), req.screen_w, req.screen_h)
+    save_config(id, inst.config, tile)
+    return {"ok": True, "path": str(config_path(id))}
 
 
 class StartReq(BaseModel):

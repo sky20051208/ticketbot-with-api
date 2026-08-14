@@ -215,6 +215,7 @@ function renderCard(item) {
   // PAUSE 按鈕初始字
   if (item.paused) card.querySelector(".btn-pause").textContent = "繼續";
 
+  card.querySelector(".btn-save").addEventListener("click", (e) => saveOne(item.id, card, e.currentTarget));
   card.querySelector(".btn-start").addEventListener("click", () => startOne(item.id));
   card.querySelector(".btn-pause").addEventListener("click", (e) => pauseOne(item.id, e.currentTarget));
   card.querySelector(".btn-stop") .addEventListener("click", () => stopOne(item.id));
@@ -331,6 +332,16 @@ async function startOne(id) {
 }
 async function stopOne(id) {
   await api("POST", `/api/instances/${id}/stop`);
+}
+// 只存不跑。欄位改動只會存在記憶體（scheduleSave 打的是 PUT config），
+// 要落地成 profiles/acc_N/config.json 一定要按這顆或按 START。
+async function saveOne(id, card, btn) {
+  await api("PUT", `/api/instances/${id}/config`, readCardConfig(card));
+  const r = await api("POST", `/api/instances/${id}/save`, screenInfo());
+  const old = btn.textContent;
+  btn.textContent = "已存";
+  setTimeout(() => { btn.textContent = old; }, 1200);
+  console.log("saved:", r.path);
 }
 async function pauseOne(id, btn) {
   const r = await api("POST", `/api/instances/${id}/pause`);
