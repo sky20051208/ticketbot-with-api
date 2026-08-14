@@ -107,9 +107,6 @@ async def grab_loop(tab, slug: str, catalog: list, csrf: str) -> str | None:
             csrf = fresh
         await asyncio.sleep(CLEAR_COOLDOWN_SECONDS)
 
-    print(f"[GRAB] 清票逾時 {GRAB_TOTAL_SECONDS:.0f}s，未搶到")
-    return None
-
 
 async def main_async():
     slug = config.ACTIVITY_SLUG

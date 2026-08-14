@@ -121,12 +121,14 @@ def poll_and_grab(session, plan: dict, token: str, poller) -> dict:
     回 {"orderId": …} 或 {"error": …, "fatal": True}。"""
     poller.warm()      # 走過倒數的話已經暖好了，這裡是 no-op
     try:
-        return _grab_loop(poller, plan, token, plan["amount"])
+        return _grab_loop(session, poller, plan, token, plan["amount"])
     finally:
         poller.close()
 
 
-def _grab_loop(poller, plan: dict, token: str, amount: int) -> dict:
+def _grab_loop(session, poller, plan: dict, token: str, amount: int) -> dict:
+    """`session` 是**主執行緒**那條（queue 網域已暖），送單一定要用它 ——
+    偵測走 poller 的 worker 連線，但 enqueue/reserve 不能借那些 thread。"""
     started = time.monotonic()
     cooldown: dict[str, float] = {}   # per 票種：售完/被搶走後的清票冷卻
     attempt = 0
