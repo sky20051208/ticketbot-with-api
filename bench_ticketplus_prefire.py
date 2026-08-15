@@ -40,10 +40,22 @@ uuid 只是排隊憑證，放著不用會自己過期。要跑完整條鏈路才
 
 **三張卡片的 ACTIVITY_SLUG 和 DATE_KEYWORD 要設成一樣**（同一個場次），才是乾淨的
 對照 —— 只有提前秒數不同。`--lead 0` = 等 status 翻 onsale 才送 = 現行行為。
+
+跑之前一定要做的兩件事
+──────────────────────
+1. **把上一次留下來的 Chrome 關掉**。userdata 模式是拿那個 profile 開瀏覽器讀登入態，
+   profile 同時只能被一個 Chrome 開著 —— 沒關的話 nodriver 開不起來，會**默默卡在
+   「請完成登入」等 600 秒**（不報錯，很容易以為是網路慢）。
+2. **用專案的 .venv 跑**。全域 Python 跟 .venv 的套件版本不一樣（實測 curl_cffi
+   0.14 vs 0.15，指紋種類 5 vs 8），而 GUI spawn 子進程是用 sys.executable，
+   兩邊混用會讓「測起來正常、正式跑卻不一樣」。
+       .\\.venv\\Scripts\\python.exe bench_ticketplus_prefire.py ...
 """
 import argparse
 import asyncio
 import json
+import os
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -306,6 +318,15 @@ async def run(args):
 
     if browser is not None:
         log("INIT", "（Chrome 保持開著，要關自己關）")
+        # nodriver 的 subprocess transport 在直譯器關閉時會噴一整片
+        # "Exception ignored in __del__ / I/O operation on closed pipe"——純粹是
+        # Windows asyncio 的收尾雜訊，出現在 RESULT 之後、不影響任何結果。
+        # 但開賣當下看到一片紅字很難第一眼分辨有沒有真的出事，所以結果印完就直接離開。
+        # 用 os._exit 是因為要跳過的正是那段會噴錯的 cleanup；Chrome 是另一個 process，
+        # 不會被一起帶走。先手動 flush，確保上面的輸出都已經寫出去。
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
 
 def main():
