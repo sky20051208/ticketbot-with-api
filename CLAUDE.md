@@ -22,17 +22,18 @@ Happy path：`GAME → AREA → TICKET → QUEUE → CHECKOUT`；AREA 被導去�
 | [tixcraftapi/__init__.py](tixcraftapi/__init__.py) | 只放 `BASE = "https://tixcraft.com"` 常數 |
 | [tixcraftapi/__main__.py](tixcraftapi/__main__.py) | entry point（`python -m tixcraftapi --config X`）：argparse + `load_config_override` + log timestamp monkey-patch + `main()` 串接 |
 | [tixcraftapi/state.py](tixcraftapi/state.py) | `State` enum + `classify(url)` — **全套件唯一的 URL 語意判斷**，零依賴 |
+| [tixcraftapi/cache.py](tixcraftapi/cache.py) | 跨次執行的快取（`profiles/acc_N/tixcraft_cache.json`）：存 `area_url`（冷啟動跳過 GAME）+ 各票區表單結構（送單跳過 form GET）。只在 slug + date_keyword 都對得上時採用；過期由 FSM 自己 fallback 回 GAME 修正 |
 | [tixcraftapi/runner.py](tixcraftapi/runner.py) | FSM runner + `Context` + handlers — **唯一讀 config 的地方**（call-time 注入步驟函式）；AREA 重入 cooldown 5s / 403 cooldown 8s；captcha prefetch 掛 `ctx.captcha_prefetch` |
 | [tixcraftapi/errors.py](tixcraftapi/errors.py) | `Blocked403` + `raise_if_blocked(res, label)` — 步驟撞 403 一律 raise，音效/cooldown 由 runner 統一處理 |
 | [tixcraftapi/alerts.py](tixcraftapi/alerts.py) | 音效（sounds/403.wav、sounds/checkout.wav），只被 runner 呼叫 |
 | [tixcraftapi/proxy_bridge.py](tixcraftapi/proxy_bridge.py) | `LocalProxyBridge`：起 127.0.0.1 forwarder 自動補 `Proxy-Authorization`；給 Chrome 用（cmdline 不認 inline auth）。daemon thread，process 結束自動收 |
-| [tixcraftapi/session.py](tixcraftapi/session.py) | `build_session` (curl_cffi + cookie + proxy)、`build_headers`、`warmup_session`、`keep_alive_loop`（背景 ping 維持 TLS）、`WarmPool`（常駐熱連線，並行請求都走它） |
+| [tixcraftapi/session.py](tixcraftapi/session.py) | `build_session` (curl_cffi + cookie + proxy)、`build_headers`、`warmup_session`、`keep_alive_loop`（背景 ping 維持 TLS）、`WarmPool`（常駐熱連線，並行請求都走它）、`csrf_from_cookie`（不用 GET 頁面就算出表單 `_csrf`，見下方專節） |
 | [tixcraftapi/parsing.py](tixcraftapi/parsing.py) | 純 regex 解析，**「拓元頁面長什麼樣」的知識全集中這檔**：`game_not_open`、`has_area_button`、`parse_game_area_url`、`parse_hidden_inputs`、`parse_ticket_form`、`find_ticket_codes`、`parse_area_availables` |
 | [tixcraftapi/game.py](tixcraftapi/game.py) | Step 1：`select_game`（選場次）、`poll_until_open`（T-0 高頻 polling 抓開賣，回 `PollResult`）|
 | [tixcraftapi/verify.py](tixcraftapi/verify.py) | Step 2：`handle_verify`（presale code 驗證頁；一次 POST 帶 `confirmed=true` 省 RTT，失敗 fallback 走兩步） |
 | [tixcraftapi/area.py](tixcraftapi/area.py) | Step 3：`select_area`（排除關鍵字 + 四種模式；被 redirect 時**回傳落點 URL 交 FSM**，不自己處理 verify；`prefetched_html` 有值就跳過 GET） |
 | [tixcraftapi/captcha.py](tixcraftapi/captcha.py) | `fetch_captcha_image`、`solve_captcha`（重試直到 4 字）、`CaptchaPrefetch`（跑在 `WarmPool` 上做 GET+OCR，每步都印耗時；**啟動後到 submit POST 之間 session 不可再 GET /ticket/captcha**，server 只認最後一張） |
-| [tixcraftapi/submit.py](tixcraftapi/submit.py) | Step 4：`submit_ticket`（並行 GET 表單+抓驗證碼；驗證碼錯換一張，倒數第二輪起重抓表單避免 _csrf 過期）。**坑（2026-07 花錢踩過）**：同頁可能有多個票區代碼（`find_ticket_codes` 回 list），只買 `cached_code`，**其餘代碼要明確歸零覆蓋**，不能只 `dict(cached_payload)` 沿用 hidden input 殘留值（殘留不一定是 0，會多買到別區） |
+| [tixcraftapi/submit.py](tixcraftapi/submit.py) | Step 4：`submit_ticket`（並行 GET 表單+抓驗證碼；驗證碼錯換一張，倒數第二輪起重抓表單避免 _csrf 過期）。**坑（2026-07 花錢踩過）**：同頁可能有多個票區代碼（`find_ticket_codes` 回 list），只買 `cached_code`，**其餘代碼的 `ticketPrice` 要明確歸零**，不能只 `dict(cached_payload)`（會多買到別區）。但 **`priceSize` 相反，要照抄頁面原值不要覆蓋**——那是 hidden input，實測 VIP 套票 / 一區多票種的場次全都是 `value="1"`，跟張數無關（2026-08-16 修正，之前送的是張數）。**fast path**：`form_cache` 命中時整發 form GET 跳過，直接 POST（見下方專節） |
 | [tixcraftapi/order.py](tixcraftapi/order.py) | Step 5：`follow_order` 跟隨 redirect；`_poll_order_loop` 打 `/ticket/check` 等到 checkout；非預期落點回傳 URL 交 FSM |
 | [tixcraftapi/finalize.py](tixcraftapi/finalize.py) | `open_chrome_with_session`：搶到後開乾淨 Chrome 注入 cookie（**只給 string 模式用**；userdata 模式走 `browser_login.inject_cookies_and_go`） |
 
@@ -42,6 +43,52 @@ Happy path：`GAME → AREA → TICKET → QUEUE → CHECKOUT`；AREA 被導去�
 - 並行請求**一律丟 `ctx.pool`（`WarmPool` 的常駐 worker）**，不要再 `with ThreadPoolExecutor(...)` 現開
 - **form GET / POST 等主線請求留在主執行緒**，那條在倒數期間被 `make_main_thread_keepalive` 一直 ping 著（背景 keep-alive thread 暖不到主執行緒，這就是以前 T-0 第一發要 2.9 秒的原因）
 - 診斷看這幾行：`[WARMUP] 第2發`（純 RTT 基準）、`[POOL]`（worker 連線）、`[KEEPALIVE] 主執行緒`、`[PREFETCH] GET=/OCR=`、`[PERF] form GET=/並行總=`
+
+**票區代碼 & 跳過 form GET（2026-08-16 實測整串）**：`TicketForm[ticketPrice][NN]` 的 `NN` 是**票價層級**的 id，同價位的票區共用（劉若英場：藍202區3800 和 紅219區3800 都是 `03`）。
+- **它只存在 ticket 頁的 HTML 裡，area 頁推不出來**。area 頁整頁 `TicketForm`/`ticketPrice`/`priceId` 出現 0 次，`<a>` 標籤只有 id 沒別的屬性。**ticket URL 最後那段不是代碼**（26_joji 有五個區尾段都是 `31`，代碼卻是 `13`/`04`/`05`/`03`/`03`；50 個區只用 10 種尾段值卻有 13+ 種票種）——[state.py](tixcraftapi/state.py) 註解寫的 `{price}` 是誤解
+- **沒有任何 API 可以先問到**：前端唯一的 ajax 是 `/activity/search-suggest/`，猜測的 `/api/...` 全 301；用真 Chrome 錄 CDP 封包走一次 area→ticket，點擊那下**零 XHR**，154 個回應裡只有 ticket 頁那發 Document GET 帶代碼
+- **代碼跨場次一致但不跨活動**：同活動不同場次相同（26_btskhbus 兩場 `03`~`08` 全對得上），**同場地不同活動完全不共用**（TICC 的 `code=04` 在 27_atc 是全票 2,600、在 26_khalid 是全票 6,700）
+- **`_csrf` 可以不 GET 頁面自己算**（`session.csrf_from_cookie`）：Yii2 masked token，server 驗證時兩邊都 unmask 再比，cookie 那顆包在「64 字 HMAC + urlencode(PHP serialize)」裡。實測自算的 POST 回應跟正常流程 **byte 數完全相同**，亂造的則 301 踢回首頁
+- 兩者合起來 → `Context.form_cache`（key = ticket_url）命中時**整發 form GET 省掉**。第一發被打回就丟快取退回正常流程（200 分不出是驗證碼錯還是快取過期，安全優先）。**T-0 第一次進場仍然要 GET 一次**，快取是給清票重試 / 同一區重進用的
+- 表單總共只有五個欄位：`_csrf` / `TicketForm[ticketPrice][NN]` / `TicketForm[priceSize][NN]` / `TicketForm[verifyCode]` / `TicketForm[agree]`
+
+**省時間只有一個方向：減少請求「發數」（2026-08-16 美東 VPS 實測）**
+```
+靜態 JS 128ms/3.4KB   驗證碼圖 265ms/3.5KB   search-suggest 335ms/157B
+AREA 299ms/73KB       /activity 399ms/542KB  GAME 527ms/58KB
+```
+- **回應大小跟耗時完全無關**：只回 157 bytes 的 JSON API 要 335ms，542KB 的活動列表只要 399ms。
+  `TTFB == total`（差 0.07ms）—— 頁面早就 gzip 過，傳輸時間是 0。**「換更小的 endpoint」省不到東西**
+- 任何動態請求都是 **~300ms 起跳**（PHP + DB + eps 中間層的固定成本），靜態檔 128ms 是網路地板
+- 所以每砍掉一發就是實打實的 300ms（本機經 proxy 更多，約 520ms）。三層優化實測：
+  | | 本機 | 美東 VPS | 美東 + 快取 |
+  |---|---|---|---|
+  | GAME | 487ms | 545ms | **0**（cache.py） |
+  | AREA | 568ms | 327ms | 573ms |
+  | form GET | 599ms | 311ms | **0**（fast path） |
+  | 合計 | 1654ms | 1182ms | **574ms** |
+- **搬機房只值 11%**（1654→1472，網路省 218ms 但 GAME/AREA 的伺服器 render 兩邊一樣），
+  真正有感的是砍發數。剩下的 AREA 那發砍不掉 —— 要即時票況
+- 拓元的 TTFB 波動很大（同一個 AREA 頁量到 299~573ms），單次數字別當定論
+
+**階段分解實測（[bench_tixcraft_profile.py](bench_tixcraft_profile.py)，2026-08-16 本機）**：
+把一發請求拆成 DNS/TCP/TLS/伺服器/下載，確認「客戶端這邊已經沒有東西可以省」：
+```
+GAME 頁 第1發(冷)  772ms │ DNS 54  TCP 46  TLS 60 │ 伺服器 611 │ 下載  1 │ 58KB HTTP/2
+GAME 頁 第4發(熱)  513ms │ DNS  0  TCP  0  TLS  0 │ 伺服器 499 │ 下載 12 │ 58KB HTTP/2
+```
+- **連線重用 / DNS / TLS / HTTP 版本（①②③④）全部沒有優化空間**：熱連線三段都是 0ms，
+  協定已經是 HTTP/2。冷連線那 160ms 靠 `WarmPool` + keepalive already 解決
+- **解析（⑤⑥）佔 0.12%**：57KB HTML 跑完所有 `parsing.*` 最慢的 `game_not_open` 只要
+  0.608ms（其餘 0.03~0.17ms）。拓元回 HTML 不是 JSON，沒有反序列化成本
+- **CPU（⑧）佔 0.0%**：一發 525ms 裡 CPU 時間量不到，100% 純等網路 —— context switch
+  不可能是瓶頸，加 thread 也不會變快（只會多付新連線的 145ms）
+- **⇒ 唯一的槓桿是「少發幾發」**（⑦）。這也是 cache.py 和 form fast path 的由來
+- 工具用法：`python bench_tixcraft_profile.py --profile <chrome profile 名>`。
+  **一定要帶真 cookie 且讓瀏覽器先載入要量的那一頁** —— 只開首頁拿到的 cookie 打 GAME
+  頁仍是 401（eps 挑戰按路徑跑），量到的會是 5.9KB 的挑戰頁而不是 58KB 的真頁面。
+  底層要用 `Curl` 不能用 `requests.Session`（後者請求完會 `reset()`，`getinfo` 全歸零），
+  而且要自己設 `CurlOpt.ACCEPT_ENCODING=b""` 才會自動解壓（否則下載時間和大小都是壓縮值）
 
 **新增 / 改步驟時的耦合鐵律**：
 - 步驟函式只收 `(session, url, 明確參數)`、回「落點 URL 或 None」；**不讀 config、不 import 彼此、不自己解讀 redirect 去向**（交給 `state.classify`）
