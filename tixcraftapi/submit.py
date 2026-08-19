@@ -13,6 +13,7 @@ from tixcraftapi import BASE
 from tixcraftapi.captcha import CaptchaPrefetch, fetch_captcha_image, solve_captcha
 from tixcraftapi.errors import raise_if_blocked
 from tixcraftapi.parsing import parse_ticket_form, find_ticket_codes
+from tixcraftapi.session import csrf_from_cookie
 from captchaAI.predict import recognize_captcha
 
 
@@ -24,7 +25,7 @@ _LOCAL_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="submit-fallb
 def submit_ticket(session: cf_requests.Session, ticket_url: str, headers: dict,
                   ticket_amount, max_rounds: int,
                   prefetch: CaptchaPrefetch | None = None,
-                  pool=None) -> str | None:
+                  pool=None, form_cache: dict | None = None) -> str | None:
     captcha_headers = {**headers, "Referer": ticket_url}
 
     cached_payload: dict | None = None
@@ -32,6 +33,26 @@ def submit_ticket(session: cf_requests.Session, ticket_url: str, headers: dict,
     cached_codes: list[str] = []
     prefetched_code: str | None = None
     prefetched_img: bytes | None = None
+    used_fast_path = False
+
+    # Fast path：這個票區的表單之前已經抓過（清票重試 / 同活動別場先學到）→ 整發 form GET
+    # 可以省掉。表單裡唯一每次都變的是 `_csrf`，而它算得出來（見 session.csrf_from_cookie），
+    # 驗證碼本來就由 AREA 那邊 prefetch，所以 T-0 的關鍵路徑只剩 POST 一發。
+    entry = (form_cache or {}).get(ticket_url)
+    if entry:
+        csrf = csrf_from_cookie(session)
+        if csrf:
+            cached_payload = {**entry["payload"], "_csrf": csrf}
+            cached_codes = entry["codes"]
+            cached_code = entry["code"]
+            used_fast_path = True
+            if prefetch is not None:
+                prefetched_code = prefetch.wait(3.0)
+            extra = f"（同頁另有 {cached_codes[1:]}）" if len(cached_codes) > 1 else ""
+            print(f"[TICKET] fast path：票區代碼 {cached_code} 用快取{extra}，"
+                  f"_csrf 由 cookie 算出 → 跳過 form GET")
+        else:
+            print("[TICKET] cookie 沒有 _csrf，fast path 放棄，走正常流程")
 
     def _timed_form_get():
         t0 = time.perf_counter()
@@ -96,6 +117,12 @@ def submit_ticket(session: cf_requests.Session, ticket_url: str, headers: dict,
             cached_codes = codes
             extra = f"（同頁另有 {codes[1:]}，會明確歸零不送出）" if len(codes) > 1 else ""
             print(f"[TICKET] 票區代碼: {cached_code} (parse {parse_ms:.0f}ms){extra}")
+            # 存起來給下一輪 / 下一次進同一區用（`_csrf` 不存，它每次自己算）
+            if form_cache is not None:
+                form_cache[ticket_url] = {
+                    "codes": codes, "code": codes[0],
+                    "payload": {k: v for k, v in payload.items() if k != "_csrf"},
+                }
 
         # 取得驗證碼：優先用 area prefetch 的 OCR 結果、再來是並行 fallback 的圖、最後重抓
         verify_code = ""
@@ -110,14 +137,14 @@ def submit_ticket(session: cf_requests.Session, ticket_url: str, headers: dict,
             verify_code = solve_captcha(session, captcha_headers)
 
         # 組裝 payload（以 cached 為基底，避免汙染）。
-        # 同頁可能不只一個票區代碼（不同價格區間），只買 cached_code 這個；其餘代碼
-        # 明確歸零覆蓋，不能依賴原始表單 hidden input 殘留的預設值——實測過殘留值不一定
-        # 是 0，會導致明明只設定買 1 張卻多買到其他代碼那份，多花錢。
+        # 同頁可能不只一個票區代碼（不同價格區間），只買 cached_code 這個，其餘明確歸零
+        # ——實測過不寫的話會多買到別區，白花錢（2026-07）。
+        # `priceSize` 則**照抄頁面原值不要動**：它是 hidden input，實測 VIP 套票 / 一區
+        # 多票種的場次全都是 value="1"，跟張數無關（真人瀏覽器送的就是 1）。
         post_payload = dict(cached_payload)
         for code in cached_codes:
-            amount = ticket_amount if code == cached_code else "0"
-            post_payload[f"TicketForm[ticketPrice][{code}]"] = amount
-            post_payload[f"TicketForm[priceSize][{code}]"] = amount
+            post_payload[f"TicketForm[ticketPrice][{code}]"] = (
+                ticket_amount if code == cached_code else "0")
         post_payload["TicketForm[verifyCode]"] = verify_code
         post_payload["TicketForm[agree]"] = "1"
 
@@ -136,8 +163,17 @@ def submit_ticket(session: cf_requests.Session, ticket_url: str, headers: dict,
         # 200 = 驗證碼錯或其他表單錯誤
         if status == 200:
             print(f"[TICKET] 驗證碼錯誤，換一張重試 ({round_n}/{max_rounds})")
+            if used_fast_path:
+                # 200 分不出是「驗證碼錯」還是「快取的表單結構過期」，一次就退回正常流程：
+                # 第一發沒中的話後面也不差那個 RTT，安全優先。
+                print("[TICKET] fast path 被打回，丟掉快取改走正常流程重抓表單")
+                if form_cache is not None:
+                    form_cache.pop(ticket_url, None)
+                cached_payload = None
+                cached_code = None
+                used_fast_path = False
             # 倒數第二輪起 fallback：可能 _csrf 真的過期，下一輪重抓表單
-            if round_n >= max_rounds - 1:
+            elif round_n >= max_rounds - 1:
                 cached_payload = None
                 cached_code = None
             continue

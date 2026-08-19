@@ -399,7 +399,7 @@ async def save_only(id: int, req: SaveReq):
     """只存設定、不啟動。
 
     以前只有 START 會呼叫 save_config，所以「設定好但先不跑」根本沒辦法留下來 ——
-    關掉瀏覽器就沒了，也沒辦法給外部工具（例如 bench_ticketplus_prefire.py）讀。
+    關掉瀏覽器就沒了，也沒辦法給外部工具（bench / 診斷腳本）讀 profiles/acc_N/config.json。
     """
     if id not in instances:
         raise HTTPException(404)

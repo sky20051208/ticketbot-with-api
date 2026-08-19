@@ -26,6 +26,11 @@ READ_USER_COOKIE = "document.cookie.split('; ').find(c=>c.startsWith('user='))||
 # TicketPlus 的 token 只活 60 分鐘，profile 裡上次登入留下的那顆通常早就死了。
 MIN_TOKEN_LIFE = 120.0
 
+# CDP 呼叫的上限：nodriver 的 CDP websocket 偶爾會卡住不回（headless=False + proxy 尤甚），
+# 而「卡住」不是例外、except 抓不到，會把整支 bot 停在原地。所有 tab.send/evaluate 一律
+# 包 asyncio.wait_for 這個秒數 —— 讀/寫 cookie 都不是搶票關鍵路徑，逾時就跳過往下走。
+CDP_TIMEOUT = 3.0
+
 
 def activity_url(event_id: str) -> str:
     return f"{BASE}/activity/{event_id}"
@@ -69,8 +74,9 @@ def _browser_args(proxy_url):
 async def read_user_cookie(tab) -> str:
     """讀原始的 `user=` cookie 字串（access_token 和 refresh_token 都在裡面）。"""
     try:
-        raw = await tab.evaluate(READ_USER_COOKIE, return_by_value=True)
-    except Exception:
+        raw = await asyncio.wait_for(
+            tab.evaluate(READ_USER_COOKIE, return_by_value=True), timeout=CDP_TIMEOUT)
+    except Exception:      # 含 asyncio.TimeoutError；讀不到就當沒登入，登入迴圈下一輪再試
         return ""
     # nodriver: falsy 值可能回原始 RemoteObject，所以先確定是 str 再用
     return raw if isinstance(raw, str) else ""
@@ -93,8 +99,13 @@ async def write_user_cookie(tab, access_token: str, refresh_token: str) -> bool:
     讀出來，照原樣的屬性寫回去。
     """
     from nodriver import cdp
+    # **每個 CDP 呼叫都要包超時**：headless=False + 走 proxy 的 nodriver，CDP websocket
+    # 偶爾會卡住不回（分頁狀態異常 / proxy 彈窗），而卡住不是例外、下面的 except 抓不到，
+    # 整支 bot 會在倒數前就永遠停在這裡（2026-08-17 實測：換發 token 成功後卡死，連 [PLAN]
+    # 都印不出來）。寫回 cookie 只影響搶到後結帳頁要不要重登，不值得為它冒卡死整場的風險。
     try:
-        cookies = await tab.send(cdp.network.get_cookies([BASE]))
+        cookies = await asyncio.wait_for(
+            tab.send(cdp.network.get_cookies([BASE])), timeout=CDP_TIMEOUT)
         target = next((c for c in cookies if c.name == "user"), None)
         if target is None:
             print("[TOKEN] 瀏覽器裡找不到 user cookie，跳過寫回")
@@ -103,13 +114,17 @@ async def write_user_cookie(tab, access_token: str, refresh_token: str) -> bool:
         data["access_token"] = access_token
         if refresh_token:
             data["refresh_token"] = refresh_token
-        await tab.send(cdp.network.set_cookie(
+        await asyncio.wait_for(tab.send(cdp.network.set_cookie(
             name="user",
             value=quote(json.dumps(data, separators=(",", ":")), safe=""),
             domain=target.domain, path=target.path,
             secure=target.secure, http_only=target.http_only,
-        ))
+        )), timeout=CDP_TIMEOUT)
         return True
+    except asyncio.TimeoutError:
+        print(f"[TOKEN] 寫回瀏覽器 cookie 逾時 {CDP_TIMEOUT:.0f}s（CDP 卡住），跳過往下走 —— "
+              f"不影響送單，但搶到後結帳頁可能要重新登入")
+        return False
     except Exception as e:
         print(f"[TOKEN] 寫回瀏覽器 cookie 失敗（不影響送單，但結帳頁可能要重新登入）: "
               f"{type(e).__name__}: {e}")

@@ -24,11 +24,12 @@ from captchaAI.predict import warmup_ocr
 from LineBot import line_push
 from timeWatcher import TimeWatcher, taipei_now
 
-from tixcraftapi import BASE
+from tixcraftapi import BASE, cache, perf
 from tixcraftapi.session import (build_session, build_headers, warmup_session,
                                  keep_alive_loop, WarmPool)
+from tixcraftapi.captcha import CaptchaPrefetch
 from tixcraftapi.game import poll_until_open
-from tixcraftapi.parsing import parse_game_keys
+from tixcraftapi.parsing import parse_game_keys, parse_game_area_url
 from tixcraftapi.state import State
 from tixcraftapi.runner import Context, run
 from tixcraftapi.finalize import open_chrome_with_session
@@ -64,20 +65,34 @@ def prefetch_area_urls(session, slug: str, date_keyword: str = "") -> list[str]:
 
     拓元在**開賣前**就會把場次列印出來（有 data-key、還沒有 data-href），所以倒數階段
     就能算出 `/ticket/area/{slug}/{key}`，T-0 直接拿去 poll —— 一旦命中，那份 HTML 就是
-    AREA 步驟要的東西，整個 AREA GET 省掉。抓不到就回空 list，polling 退回只看 game 頁。"""
+    AREA 步驟要的東西，整個 AREA GET 省掉。抓不到就回空 list，polling 退回只看 game 頁。
+
+    **已開賣時直接用頁面給的 `data-href`**，不要再用 data-key 猜：猜出來的清單會含
+    已截止的購票專區（打過去一律 301，白白吃掉 eps 配額）。
+
+    這一發同時兼任 `warmup_session` 的「第 2 發」（純 RTT 基準）—— 啟動序列對同一個
+    game URL 打太多發會撞限流，能合併的就合併。
+    """
     url = f"{BASE}/activity/game/{slug}"
     try:
+        t0 = time.monotonic()
         res = session.get(url, headers=build_headers(
             referer=f"{BASE}/activity/detail/{slug}"), timeout=10)
+        rtt_ms = (time.monotonic() - t0) * 1000
         if res.status_code != 200:
             print(f"[PREOPEN] game 頁 HTTP {res.status_code}，跳過 area URL 預測")
             return []
+        print(f"[PREOPEN] game 頁 {rtt_ms:.0f}ms（純 RTT 基準，兼 warmup 第2發）")
+        opened = parse_game_area_url(res.text, date_keyword)
+        if opened:
+            print(f"[PREOPEN] 已開賣，直接用頁面給的 area URL: {opened}")
+            return [opened]
         keys = parse_game_keys(res.text, date_keyword)
     except Exception as e:
         print(f"[PREOPEN] 抓 data-key 失敗（不致命）: {type(e).__name__}: {e}")
         return []
     if not keys:
-        print("[PREOPEN] 頁面沒有 data-key，T-0 只 poll game 頁")
+        print("[PREOPEN] 頁面沒有可買場次的 data-key，T-0 只 poll game 頁")
         return []
     hints = [f"{BASE}/ticket/area/{slug}/{k}" for k in keys[:2]]   # 最多 2 個，控制請求量
     print(f"[PREOPEN] 預測 area URL: {hints}")
@@ -168,6 +183,7 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
     _install_log_timestamp()
     load_config_override()
+    perf.install()      # 只有 TIX_PERF=1 才會掛，正式搶票不受影響
 
     # --- userdata 模式：proxy 必須先 acquire 才能讓 Chrome login 走 proxy IP ---
     # （否則登入 cookie 綁到你家 IP，多帳號一比對就破功）
@@ -212,7 +228,9 @@ def main():
         proxy_pool.acquire()
 
     session = build_session(config.COOKIE, local_ip=config.LOCAL_BIND_IP)
-    warmup_session(session, slug=config.ACTIVITY_SLUG)
+    # 只打一發建連線；純 RTT 基準交給下面 prefetch_area_urls 那發兼任
+    # （同一個 game URL 在啟動瞬間打太多發會撞 eps 限流，見該函式說明）
+    warmup_session(session, slug=config.ACTIVITY_SLUG, shots=1)
 
     # 並行請求專用的常駐熱連線（captcha prefetch / submit 並行抓圖都走它）。
     # 現在就建起來，倒數期間跟主執行緒一起被 ping，T-0 時每條連線都是熱的。
@@ -254,14 +272,41 @@ def main():
         print("[TIMER] 定時啟動已關閉，直接開搶")
 
     # --- 進 FSM ---
+    # 上次跑學到的東西（場次 URL、各票區的表單結構）；活動對不上會自動回空的
+    cache_file = cache.cache_path(config.BASE_DIR, config.ACC_ID)
+    cached = cache.load(cache_file, config.ACTIVITY_SLUG, config.DATE_KEYWORD,
+                        config.AREA_KEYWORD)
+
     # 若 polling 階段已拿到 area_url，把它塞進 ctx 並從 AREA state 開始；否則從 GAME 開始
-    ctx = Context(session=session, slug=config.ACTIVITY_SLUG, pool=pool)
+    ctx = Context(session=session, slug=config.ACTIVITY_SLUG, pool=pool,
+                  form_cache=cached["forms"])
+    if cached["forms"]:
+        print(f"[CACHE] 載入 {len(cached['forms'])} 個票區的表單結構（送單可跳過 form GET）")
     if poll_result:
         ctx.area_url = poll_result.area_url
         ctx.area_html = poll_result.area_html   # 有值 → AREA 步驟直接用，不再 GET
         initial_state = State.AREA
         hint = "（含頁面，省一發 GET）" if poll_result.area_html else ""
         print(f"[GAME] 沿用 polling 拿到的場次{hint}: {poll_result.area_url}")
+    elif cached["ticket_url"] and cached["forms"].get(cached["ticket_url"]):
+        # **T-0 直接送單**：GAME 和 AREA 兩發全省，開場第一發就是 POST。
+        # 敢這樣做是因為 T-0 那一刻所有票區都還有票 —— AREA 那發只是去確認一件
+        # 當下必然成立的事。沒中（票區滿了 / 表單過期）的話 submit 回 None，
+        # FSM 會退回 AREA（ctx.area_url 也在快取裡）照正常流程重來，只虧一發。
+        ctx.area_url = cached["area_url"]
+        ctx.ticket_url = cached["ticket_url"]
+        initial_state = State.TICKET
+        # 驗證碼平常是 AREA handler 順手起的 —— 跳過 AREA 就沒人幫忙抓了，這裡自己補。
+        # 不補的話 submit 會 fallback 成「現場抓圖 + OCR」，等於把省下來的 RTT 又還回去。
+        ctx.captcha_prefetch = CaptchaPrefetch(
+            session, build_headers(referer=cached["ticket_url"]), pool=pool)
+        print(f"[CACHE] T-0 直接送單，跳過 GAME + AREA: {cached['ticket_url']}")
+    elif cached["area_url"]:
+        # 冷啟動也能跳過 GAME。這個 URL 過期的話 AREA 會失敗 → FSM 自己 fallback 回
+        # GAME 重拿，不用在這裡判斷有效性。
+        ctx.area_url = cached["area_url"]
+        initial_state = State.AREA
+        print(f"[CACHE] 沿用上次的場次 URL，跳過 GAME: {cached['area_url']}")
     else:
         initial_state = State.GAME
 
@@ -293,6 +338,11 @@ def main():
     except KeyboardInterrupt:
         print("\n[EXIT] 手動中斷")
     finally:
+        # 先存快取 —— 下面 grabbed 那條會停在無限迴圈等使用者付款，擺後面永遠寫不到
+        cache.save(cache_file, config.ACTIVITY_SLUG, config.DATE_KEYWORD,
+                   config.AREA_KEYWORD, ctx.area_url, ctx.ticket_url, ctx.form_cache)
+        # 總表要印在下面那個「保持開啟」的無限迴圈**之前**，否則永遠印不出來
+        perf.summary()
         if login_driver is not None:
             if grabbed:
                 # 搶到了：瀏覽器停在結帳頁，保持開啟讓使用者付款

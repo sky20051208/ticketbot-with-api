@@ -8,7 +8,9 @@
 
 本檔只負責拿資料，挑哪一個交給 [parsing.py](ticketplus_api/parsing.py)。
 """
+import itertools
 import math
+import os
 import random
 import threading
 import time
@@ -18,6 +20,12 @@ from curl_cffi import requests as cf_requests
 
 from ticketplus_api import CONFIG_API
 from ticketplus_api.session import build_headers
+
+# 併行 burst 的逐發去/回 log。預設關（20 發/秒 × 2 行會洗版、還多花 print I/O）；
+# 要盯開賣瞬間「pending → onsale 翻牌」時設 TP_POLL_VERBOSE=1 打開。
+# 併行時多發同時在飛，回應順序跟送出順序不一定一致，所以每發帶一個序號配對去跟回。
+_POLL_VERBOSE = os.environ.get("TP_POLL_VERBOSE") == "1"
+_poll_seq = itertools.count(1)
 
 _S3 = f"{CONFIG_API}/getS3"
 
@@ -144,6 +152,25 @@ def _fresh_params(product_ids: list[str] | None,
     if areas:
         params.append("ticketAreaId=" + ",".join(random.sample(areas, len(areas))))
     return params
+
+
+def _status_summary(result: dict, blocked: bool) -> str:
+    """把一發票況壓成一行看得懂的摘要，給 TP_POLL_VERBOSE 的「回」用。
+    重點是讓人一眼看到「哪些票種是 onsale、還剩幾張」——盯的就是它從 pending 翻過去那刻。"""
+    if blocked:
+        return "⛔ 被擋/流量管制"
+    products = (result or {}).get("product") or []
+    if not products:
+        return "（空／尚未有票況）"
+    tally: dict[str, list] = {}
+    for p in products:
+        st = str(p.get("status", "?"))
+        tally.setdefault(st, []).append(p.get("count"))
+    parts = []
+    for st, counts in tally.items():
+        total = sum(c for c in counts if isinstance(c, (int, float)))
+        parts.append(f"{st}×{len(counts)}（共剩 {total}）")
+    return "  ".join(parts)
 
 
 def get_infos(session: cf_requests.Session, product_ids: list[str] | None = None,
@@ -321,11 +348,22 @@ class InfoPoller:
                   f"（RTT {min(rtts):.0f}~{max(rtts):.0f}ms）")
 
     def _read(self) -> tuple[dict, bool, float]:
-        """一發票況。**不會 raise**（get_infos 自己吞掉所有例外）。"""
+        """一發票況。**不會 raise**（get_infos 自己吞掉所有例外）。
+        TP_POLL_VERBOSE=1 時印出這一發的「去」和「回」（含序號、RTT、各票種即時狀態）。"""
+        if not _POLL_VERBOSE:
+            t0 = time.perf_counter()
+            result, blocked = get_infos(self.session, self.product_ids, self.area_ids,
+                                        log=False)
+            return result, blocked, (time.perf_counter() - t0) * 1000
+
+        seq = next(_poll_seq)
+        print(f"[POLL→] #{seq} 送出（{len(self.product_ids)} 票種）")
         t0 = time.perf_counter()
         result, blocked = get_infos(self.session, self.product_ids, self.area_ids,
                                     log=False)
-        return result, blocked, (time.perf_counter() - t0) * 1000
+        rtt = (time.perf_counter() - t0) * 1000
+        print(f"[POLL←] #{seq} 回應 RTT {rtt:.0f}ms — {_status_summary(result, blocked)}")
+        return result, blocked, rtt
 
     def next(self) -> tuple[dict, bool, float]:
         """下一筆 (result, blocked, rtt_ms)。併行模式回的是**最早送出且已完成**的那發。"""

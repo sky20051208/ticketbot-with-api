@@ -15,7 +15,9 @@ class State(Enum):
     GAME = "GAME"             # /activity/game/{slug}
     AREA = "AREA"             # /ticket/area/{slug}/{game_id}
     VERIFY = "VERIFY"         # /ticket/verify/... 或 /activity/verify/...
-    TICKET = "TICKET"         # /ticket/ticket/{slug}/{game}/{area}/{price}
+    TICKET = "TICKET"         # /ticket/ticket/{slug}/{game}/{area}/{?}
+                              # 最後那段不是票價也不是票區代碼（實測多個區共用同一個值），
+                              # 只有 area 頁的 areaUrlList 給得出來，別想自己組
     QUEUE = "QUEUE"           # /ticket/order  (排隊頁)
     CHECKOUT = "CHECKOUT"     # /checkout  (terminal success)
     ACTIVITY = "ACTIVITY"     # /activity/detail/{slug}  (場次未開放 / 被踢回)

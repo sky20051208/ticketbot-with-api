@@ -11,8 +11,12 @@
 對策：並行請求一律丟 `WarmPool` 這組**常駐** worker，倒數期間持續 ping，讓主執行緒 +
 每條 worker 的連線全部保持熱。
 """
+import base64
+import os
+import re
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 from curl_cffi import requests as cf_requests
@@ -21,6 +25,36 @@ import config
 import proxy_pool
 from tixcraftapi import BASE
 from tixcraftapi.parsing import game_not_open, has_area_button
+
+
+# cookie `_csrf` 的內層長相：urldecode 後是 `a:2:{i:0;s:5:"_csrf";i:1;s:32:"<token>";}`
+_CSRF_IN_COOKIE = re.compile(r's:5:"_csrf";i:1;s:\d+:"([^"]+)";')
+
+
+def csrf_from_cookie(session: cf_requests.Session) -> str | None:
+    """從 cookie 直接算出一顆可用的表單 `_csrf`，**不用 GET 那一頁**。拿不到回 None。
+
+    Yii2 的 CSRF 是 masked token：`maskToken = base64url(mask + (mask XOR token))`，
+    每次 render 值都不同，但 server 驗證時把 POST 來的和 cookie 裡的**都 unmask 再比對**，
+    所以只要 token 一樣，mask 是誰做的無所謂。而 cookie 那顆被 cookie-validation 包成
+    「64 字 HMAC + urlencode(PHP serialize)」，真 token 就寫在 `s:32:"…"` 裡面。
+
+    2026-08-16 對 26_joji 實測三組（驗證碼一律故意打錯，不會成單）：
+      - 亂造 token          → 301 踢回首頁
+      - GET 頁面拿的 _csrf  → 200，58589 bytes
+      - 本函式算的 _csrf    → 200，58589 bytes（跟上一行 byte 數完全相同）
+    """
+    raw = session.cookies.get("_csrf")
+    if not raw:
+        return None
+    m = _CSRF_IN_COOKIE.search(urllib.parse.unquote(raw))
+    if not m:
+        return None
+    token = m.group(1).encode()
+    mask = os.urandom(len(token))
+    masked = bytes(a ^ b for a, b in zip(mask, token))
+    # Yii2 的 base64UrlEncode 只換 +/ 不去 padding，要照做
+    return base64.b64encode(mask + masked).decode().replace("+", "-").replace("/", "_")
 
 
 def build_session(cookie_str: str, local_ip: str = "") -> cf_requests.Session:
@@ -62,16 +96,25 @@ def build_headers(referer: str = "") -> dict:
     }
 
 
-def warmup_session(session: cf_requests.Session, slug: str = ""):
-    """打兩次 /activity/game/{slug}：第 1 發建 TLS/H2 連線（含握手成本），
+def warmup_session(session: cf_requests.Session, slug: str = "", shots: int = 2):
+    """打 /activity/game/{slug}：第 1 發建 TLS/H2 連線（含握手成本），
     第 2 發量純 RTT — 這個數字就是這條 session（含 proxy）的延遲基準，
     T-0 的 [POLL] / [PERF] 數字比它高很多就代表是 server 端塞車而不是線路問題。
-    沒 slug fallback 打首頁。打真正的 game endpoint 讓 server 端 routing handler 也 warm。"""
+    沒 slug fallback 打首頁。打真正的 game endpoint 讓 server 端 routing handler 也 warm。
+
+    **`shots=1` 的用途**：啟動序列對同一個 game URL 打太多發會撞 eps 限流（約 3 req/s）。
+    後面 `__main__.prefetch_area_urls` 本來就要再打一發同樣的頁面，讓它兼任「第 2 發」
+    並回報 RTT 基準即可，這裡就只留建連線那一發。
+    """
     target = f"{BASE}/activity/game/{slug}" if slug else f"{BASE}/"
     try:
         t0 = time.monotonic()
         session.get(target, headers=build_headers(), timeout=5)
         first_ms = (time.monotonic() - t0) * 1000
+        if shots < 2:
+            print(f"[WARMUP] 連線已建立 ({target}) | 第1發 {first_ms:.0f}ms（含握手）"
+                  f"— 純 RTT 基準由稍後的 [PREOPEN] 那發量，不重複打")
+            return
         t1 = time.monotonic()
         session.get(target, headers=build_headers(), timeout=5)
         second_ms = (time.monotonic() - t1) * 1000
@@ -89,10 +132,17 @@ class WarmPool:
     生命週期跟 process 一樣長（daemon thread，不用特別收）。
     """
 
+    # 預熱/續命用的目標：**故意挑靜態檔**。worker 要的只是「同一個 host 的熱 TLS 連線」，
+    # 而動態頁每發都要吃 eps 的請求配額（同一 URL 約 3 req/s 就開始 403），啟動瞬間
+    # size 條 worker 一起打 game 頁，加上 warmup 和 prefetch，實測 0.6 秒內 5 發同 URL
+    # 直接把後面的 AREA 打成 403。靜態檔走 nginx 直出（實測 TTFB 128ms，動態頁 300ms+），
+    # 不經 PHP、不算動態配額，建連線的效果完全一樣。
+    WARM_TARGET = f"{BASE}/js/common.js?v=20221013"
+
     def __init__(self, session: cf_requests.Session, slug: str = "", size: int = 2):
         self.session = session
         self.size = size
-        self.target = f"{BASE}/activity/game/{slug}" if slug else f"{BASE}/"
+        self.target = self.WARM_TARGET
         self.headers = build_headers()
         self._ex = ThreadPoolExecutor(max_workers=size, thread_name_prefix="warm")
 

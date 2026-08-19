@@ -25,21 +25,29 @@ def has_area_button(html: str) -> bool:
 def parse_game_keys(html: str, date_keyword: str = "") -> list[str]:
     """從 game 頁抽場次 id（`data-key`）。**開賣前就抓得到**（那時還沒有 data-href），
     拿來預先組出 area URL `/ticket/area/{slug}/{key}`，T-0 就能直接 poll 選區頁。
-    date_keyword 過濾方式跟 parse_game_area_url 一致（比對整列 HTML）。"""
+
+    **`data-key` 在 `<tr>` 標籤自己身上**（`<tr class="gridc fcTxt" data-key="22381">`），
+    不在列的內容裡 —— 所以要連標籤的屬性一起抓。2026-08-16 之前這裡是在列內容找、
+    永遠落空，然後退回「全頁掃 data-key」，結果把**已截止的購票專區**也撈進來當 poll
+    目標（26_joji 實測：22381 正在賣，22382/22383 是已截止的 MyVideo / 台灣大哥大專區，
+    打過去一律 301）。那條全頁 fallback 因此移除 —— 它產出的是錯的資料，而且
+    date_keyword 對它完全無效。
+
+    排除「截止」的列：那種場次 poll 它只是白白吃掉 eps 的請求配額（實測同一 URL
+    超過約 3 req/s 就開始 403）。
+    """
     keys: list[str] = []
-    rows = re.findall(r'<tr[^>]*class="gridc[^"]*"[^>]*>(.*?)</tr>', html, re.DOTALL)
-    for row_html in rows:
+    for m in re.finditer(r'<tr([^>]*class="gridc[^"]*"[^>]*)>(.*?)</tr>', html, re.DOTALL):
+        attrs, row_html = m.group(1), m.group(2)
+        km = re.search(r'data-key=["\']([^"\']+)["\']', attrs)
+        if not km:
+            continue
         if date_keyword and date_keyword not in row_html:
             continue
-        m = re.search(r'data-key=["\']([^"\']+)["\']', row_html)
-        if m and m.group(1) not in keys:
-            keys.append(m.group(1))
-    if keys:
-        return keys
-    # 沒有 gridc 列時（版型不同）退回全頁掃
-    for k in re.findall(r'data-key=["\']([^"\']+)["\']', html):
-        if k not in keys:
-            keys.append(k)
+        if "截止" in row_html:
+            continue
+        if km.group(1) not in keys:
+            keys.append(km.group(1))
     return keys
 
 

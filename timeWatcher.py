@@ -60,10 +60,14 @@ class TimeWatcher:
         # 時間誤差 (標準台北時間 - 本地系統時間)
         self.time_offset = timedelta(seconds=0)
 
-    def sync_with_ntp(self):
+    def sync_with_ntp(self, rounds=3):
         """
         NTP 對時（毫秒級精度）。
-        試多個 server，用 RTT 最小的那次為準。
+        每台 server 連問 `rounds` 次，保留**全域 delay（RTT）最小**的那一筆。
+
+        為什麼是 min-delay 而不是平均：NTP 的 offset 誤差 ≈ 去/回程不對稱量，上限是
+        delay/2。RTT 越短代表這一發越沒被排隊/抖動污染，offset 就越接近真值。多取樣是為了
+        「多幾次機會撞到一發乾淨的低延遲往返」——取平均反而會把塞車那幾發的偏差混進來。
         time.cloudflare.com 跟 tixcraft 同 CDN 體系，最接近 server 真實時間。
         """
         servers = [
@@ -75,18 +79,26 @@ class TimeWatcher:
         best = None  # (offset, delay, server)
 
         for server in servers:
-            try:
-                resp = client.request(server, version=3, timeout=2)
-                print(f"  ✔ NTP {server}: offset={resp.offset*1000:+.1f}ms delay={resp.delay*1000:.1f}ms")
+            got = 0
+            for _ in range(rounds):
+                try:
+                    resp = client.request(server, version=3, timeout=2)
+                except Exception as e:
+                    print(f"  ⚠️ NTP {server} 失敗: {e}")
+                    break   # 這台不通就別再問剩下幾次，換下一台
+                got += 1
                 if best is None or resp.delay < best[1]:
                     best = (resp.offset, resp.delay, server)
-            except Exception as e:
-                print(f"  ⚠️ NTP {server} 失敗: {e}")
+            if got:
+                print(f"  ✔ NTP {server}: {got} 發，目前最佳 delay={best[1]*1000:.1f}ms "
+                      f"(server={best[2]})")
 
         if best is None:
             return None
 
         offset, delay, server = best
+        print(f"  ⇒ 採用最低 delay 樣本：offset={offset*1000:+.1f}ms delay={delay*1000:.1f}ms "
+              f"→ 對時不確定約 ±{delay*500:.1f}ms")
         # resp.offset 只是「NTP 時間 − 本機時鐘」的毫秒級誤差，**完全不含時區**。
         # 直接拿它當 time_offset 的話，後面 `datetime.fromtimestamp(now) + offset`
         # 得到的是「機器當地時間」而不是台北時間 —— 在 Etc/UTC 的 VPS 上差 8 小時。
@@ -225,15 +237,40 @@ class TimeWatcher:
         offset_sec = self.time_offset.total_seconds()
         print(f"   - 自動補償誤差: {offset_sec:.3f} 秒")
 
+        # 最後這段改成高解析度 busy-wait（見下）。挑 0.2s 是因為它要涵蓋一個
+        # asyncio.sleep(0.05) 週期在 Windows 上最糟的實際長度（~65ms）還有餘裕。
+        SPIN_WINDOW = 0.2
+
         while True:
             # 每一輪迴圈，都用 (本地時間 + 誤差) = 準確的台北時間
             now = time.time()
             current_tw_time = datetime.fromtimestamp(now) + self.time_offset
             remaining = (self.target_time - current_tw_time).total_seconds()
-            
+
             # 觸發點：提早 self.lead_seconds 秒回傳，給 polling 緩衝抓開賣瞬間
             if remaining <= self.lead_seconds:
-                print("\n⚡⚡⚡ 時間到！啟動瀏覽器搶票！ ⚡⚡⚡")
+                # 這行以 ⚡ 開頭，不會被 __main__ 的時間戳 monkey-patch（只認 [ 開頭）
+                # 蓋章，所以自己把校正後的台北時間嵌進去 —— 這是實際觸發搶票的那一刻。
+                ts = corrected_now().strftime('%H:%M:%S.%f')[:-3]
+                print(f"\n⚡⚡⚡ 時間到！啟動搶票！ 台北 {ts} ⚡⚡⚡")
+                return True
+
+            # **精準觸發區**：進入最後 SPIN_WINDOW 秒就不再 await sleep，改用
+            # time.perf_counter()（QueryPerformanceCounter，亞微秒）tight-loop 自旋到
+            # 精確的觸發時刻。asyncio.sleep 在 Windows 上粒度 ~15.6ms、sleep(0.05) 實際
+            # 50~65ms，會讓觸發晚半個週期（±60ms 抖動）——這是唯一還能砍的客戶端抖動源，
+            # 自旋後降到 <1ms。這 0.2s 事件迴圈沒別的事（keepalive 已停），阻塞它零代價。
+            if remaining <= self.lead_seconds + SPIN_WINDOW:
+                anchor_perf = time.perf_counter()
+                fire_at = anchor_perf + (remaining - self.lead_seconds)
+                while time.perf_counter() < fire_at:
+                    pass
+                overshoot = (time.perf_counter() - fire_at) * 1000
+                # 校正後台北時間 = 實際觸發的那一刻（這行 ⚡ 開頭不會被自動蓋時間戳）。
+                # overshoot 是「比預定觸發點晚了多少」，自旋後通常 <0.01ms。
+                ts = corrected_now().strftime('%H:%M:%S.%f')[:-3]
+                print(f"\n⚡⚡⚡ 時間到！啟動搶票！ 台北 {ts}"
+                      f"（自旋觸發，誤差 {overshoot:+.2f}ms）⚡⚡⚡")
                 return True
 
             if on_tick is not None:

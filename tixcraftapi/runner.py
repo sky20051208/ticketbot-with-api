@@ -21,7 +21,7 @@
 import os
 import itertools
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from curl_cffi import requests as cf_requests
@@ -54,6 +54,9 @@ class Context:
     captcha_prefetch: Optional[CaptchaPrefetch] = None
     area_html: Optional[str] = None     # polling 直接抓到的 area 頁（用一次就清）
     pool: Optional[object] = None       # session.WarmPool：並行請求用的常駐熱連線
+    # ticket_url → 該票區的表單結構（票區代碼 + hidden 欄位，不含 _csrf）。
+    # 抓過一次就留著，之後同一區可跳過 form GET 直接 POST（submit.submit_ticket 的 fast path）。
+    form_cache: dict = field(default_factory=dict)
     iter_n: int = 0
 
 
@@ -106,7 +109,8 @@ def _h_ticket(ctx: Context) -> Optional[str]:
     return submit_ticket(ctx.session, ctx.ticket_url, headers,
                          ticket_amount=config.TICKET_AMOUNT,
                          max_rounds=config.TICKET_CAPTCHA_RETRY,
-                         prefetch=prefetch, pool=ctx.pool)
+                         prefetch=prefetch, pool=ctx.pool,
+                         form_cache=ctx.form_cache)
 
 
 def _h_queue(ctx: Context) -> Optional[str]:
@@ -232,8 +236,12 @@ def run(ctx: Context,
         handler_ms = (time.perf_counter() - t_handler) * 1000
 
         if next_url is None:
-            print(f"[FSM] {state.value} handler 失敗 ({handler_ms:.0f}ms)，fallback GAME")
-            prev_state, state = state, State.GAME
+            # TICKET 失敗時只要 area_url 還在手上（快取帶進來的、或上一輪拿到的），
+            # 退回 AREA 重新挑區就好 —— 不用整圈重跑 GAME 多付一發。
+            # 「T-0 直接送單」沒中時走的就是這條，代價只有那一發 POST。
+            fallback = State.AREA if (state == State.TICKET and ctx.area_url) else State.GAME
+            print(f"[FSM] {state.value} handler 失敗 ({handler_ms:.0f}ms)，fallback {fallback.value}")
+            prev_state, state = state, fallback
             time.sleep(config.RETRY_INTERVAL)
             continue
 

@@ -175,6 +175,16 @@ def _grab_loop(session, poller, plan: dict, token: str, amount: int,
         area, product, count = target
         info = product_infos.get(product["productId"], {})
         seat = bool(plan["session"].get("ticketArea") and info.get("seatAssignment"))
+        # 熱路徑核心：能用開賣前組好的就直接用（無劃位 + 張數沒被 purchaseLimit 夾過），
+        # 「挑到票 → 送出」中間零組裝。只有有劃位（seat 要看即時 seatAssignment）或
+        # 張數被夾（count < amount）這兩種才臨時補組 —— 兩種都罕見，也還是微秒級。
+        pre = plan.get("prebuilt", {}).get(product["productId"])
+        if pre is not None and not seat and count == amount:
+            payload = pre
+        else:
+            payload = tp_reserve.build_payload(product["productId"], count,
+                                               seat_assignment=seat,
+                                               serial_number=config.PRESALE_CODE)
         detect_s = time.monotonic() - started
         label = parsing.target_label(area, product)
         log.flush()
@@ -182,10 +192,6 @@ def _grab_loop(session, poller, plan: dict, token: str, amount: int,
               f"{'（系統配位）' if seat else ''}"
               f" — **開賣後 {detect_s:.2f}s** 才送出（含暖機等所有前置，"
               f"第 {attempt} 輪，票況 RTT {rtt:.0f}ms）")
-
-        payload = tp_reserve.build_payload(product["productId"], count,
-                                           seat_assignment=seat,
-                                           serial_number=config.PRESALE_CODE)
         outcome = tp_reserve.grab(session, payload, token)
         if outcome.get("orderId"):
             outcome["seat_assignment"] = seat   # 決定搶到後要導去哪一頁
@@ -287,14 +293,30 @@ def build_plan(session, event_id: str) -> dict | None:
     _warn_if_serial_required(session, session_id, targets)
     _warn_if_lottery(session, event_id)
 
+    # **開賣前就把每個票種的送單 payload 組好**（放進 plan，熱路徑直接拿）。
+    # 開賣前是靜態的：productId（S3 目錄就有）+ serialNumber（config）+ 張數。
+    # 唯一開賣後才知道的是「有劃位活動的 seat 旗標（seatAssignment）」和「purchaseLimit
+    # 夾出來的實際張數」—— 那兩種情況熱路徑會自己補組（見 _grab_loop），其餘直接用這份。
+    # 目的是把熱路徑的「挑到票 → 送出」中間工作壓到零，而不是省 CPU（組 dict 本來就微秒）。
+    amount = int(config.TICKET_AMOUNT or 1)
+    has_seat = bool(sess.get("ticketArea"))
+    prebuilt = {}
+    if not has_seat:      # 無劃位活動：payload 全靜態，開賣前就能定案
+        for _area, product in targets:
+            pid = product["productId"]
+            prebuilt[pid] = tp_reserve.build_payload(
+                pid, amount, seat_assignment=False,
+                serial_number=config.PRESALE_CODE)
+
     # **「要 poll 什麼」跟「要買什麼」要分開**：偵測一律打整場所有 id，只有下單才看
     # targets。原因是 `catalog._fresh_params` 靠「把 id 排列順序打亂」來繞 CloudFront
     # 快取，而變體數是 id 數的階乘 —— 嚴格清票把候選縮到 1~2 個票區時排列組合只剩 2 種，
     # 直接繞不過快取、偵測慢約 1 秒，剛好把併行偵測省下來的都賠回去。
     # 多帶 id 不用多送請求（本來就是一發查全部），純賺。
     return {"session": sess, "session_id": session_id, "targets": targets,
-            "amount": int(config.TICKET_AMOUNT or 1), "balanced": not strict,
+            "amount": amount, "balanced": not strict,
             "matched_keys": matched_keys, "target_price": price_target,
+            "prebuilt": prebuilt,
             "poll_products": [p["productId"] for p in products],
             "poll_areas": [a["ticketAreaId"] for a in areas]}
 
@@ -434,10 +456,14 @@ async def main_async():
     opened_at = time.monotonic()
 
     token = await _refresh_token_if_stale(token, tab)
-    # 開搶前最後一步：確保 queue 網域的連線是熱的（實測省約 5ms，不多但免費）。
-    # 倒數期間 keepalive 已經暖過一次，這裡再確認一次，順便涵蓋
-    # 「關掉定時啟動、直接開搶」那條路 —— 那條完全不會走 make_keepalive。
-    warmup_queue(session)
+    # queue 網域要在 T-0 是熱的，但**倒數期間 make_keepalive 已經一直在暖它**
+    # （log 的「[KEEPALIVE] 排隊連線續命」就是）。有倒數還在這裡再暖一發，是站在關鍵
+    # 路徑上白花約 156ms（2026-08-17 實測 log 抓到，那發直接把偵測往後推了半個 detect_s）。
+    # 這 156ms 就算連線真的冷掉了，也只會轉嫁到第一發 enqueue 的建連上（那是 queue_s，
+    # 不是 detect_s），不會疊加 —— 所以砍掉永遠不會更差。只有「關掉定時啟動、直接開搶」
+    # 那條沒走過 keepalive 的路才需要它。
+    if not config.ENABLE_TIME_WATCHER:
+        warmup_queue(session)
     outcome = poll_and_grab(session, plan, token, poller, opened_at)
 
     if outcome.get("orderId"):
