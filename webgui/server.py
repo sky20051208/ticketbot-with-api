@@ -43,6 +43,7 @@ class InstanceConfig(BaseModel):
     COOKIE: str = ""
     ACTIVITY_SLUG: str = "26_mltr"
     TICKET_AMOUNT: str = "1"
+    REQUIRE_FULL_AMOUNT: bool = False   # 剩餘量 < TICKET_AMOUNT 就跳過，不買少一點
     AREA_KEYWORD: str = ""
     AREA_AUTO_SELECT_MODE: str = "關鍵字優先"
     CLEAR_MODE: str = "寬鬆"

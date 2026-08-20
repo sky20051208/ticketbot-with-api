@@ -154,6 +154,7 @@ function renderCard(item) {
   bindText  (card, ".f-watchurl", cfg.TIME_WATCH_URL);
   bindCheck (card, ".f-timer",    cfg.ENABLE_TIME_WATCHER);
   bindCheck (card, ".f-proxy",    cfg.ENABLE_PROXY_POOL);
+  bindCheck (card, ".f-requirefull", cfg.REQUIRE_FULL_AMOUNT);
   // 出口 IP：值存空字串代表「走主 IP」，但下拉不能有空白選項，所以用一個顯示用的
   // 標籤代表它（readCardConfig 再轉回空字串）。機器上沒掛次要 IP 時就只有這一個選項。
   bindSelect(card, ".f-bindip", LOCAL_IPS,
@@ -257,6 +258,7 @@ function readCardConfig(card) {
     TIME_WATCH_URL:          card.querySelector(".f-watchurl").value,
     ENABLE_TIME_WATCHER:     card.querySelector(".f-timer").checked,
     ENABLE_PROXY_POOL:       card.querySelector(".f-proxy").checked,
+    REQUIRE_FULL_AMOUNT:     card.querySelector(".f-requirefull").checked,
     LOCAL_BIND_IP:           _bindIpValue(card),
     LINE_USER_ID:            card.querySelector(".f-lineuser").value,
     TICKET_FEE:              card.querySelector(".f-fee").value,
@@ -328,6 +330,14 @@ async function startOne(id) {
   cardLogs.set(id, []);
   const card = document.querySelector(`.card[data-id="${id}"]`);
   if (card) card.querySelector(".log").innerHTML = "";
+  // **START 前先把當前 DOM 設定同步到 server 記憶體**。不做的話，剛改的欄位還卡在
+  // scheduleSave 的 400ms debounce 裡，_start_one 會拿到舊 config 寫檔 + 開 bot ——
+  // 實測就是「選嚴格卻跑寬鬆」的根因（任何開跑前才改的欄位都會中）。
+  if (card) {
+    const p = pendingSaves.get(id);
+    if (p) { clearTimeout(p); pendingSaves.delete(id); }
+    await api("PUT", `/api/instances/${id}/config`, readCardConfig(card));
+  }
   await api("POST", `/api/instances/${id}/start`, screenInfo());
 }
 async function stopOne(id) {
@@ -357,6 +367,14 @@ $("#btn-init").addEventListener("click", async () => {
   await refresh();
 });
 $("#btn-start-all").addEventListener("click", async () => {
+  // 跟 startOne 同理：全部開跑前，先把每張卡當前 DOM 設定同步到 server（清掉 debounce），
+  // 否則剛改的欄位還沒落地就被 start_all 用舊 config 開起來了。
+  for (const card of document.querySelectorAll(".card")) {
+    const id = parseInt(card.dataset.id, 10);
+    const p = pendingSaves.get(id);
+    if (p) { clearTimeout(p); pendingSaves.delete(id); }
+    await api("PUT", `/api/instances/${id}/config`, readCardConfig(card)).catch(console.error);
+  }
   for (const id of cardLogs.keys()) {
     cardLogs.set(id, []);
     const card = document.querySelector(`.card[data-id="${id}"]`);

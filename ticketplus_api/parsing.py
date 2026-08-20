@@ -354,9 +354,13 @@ def score_target(desire: float, product_info: dict,
 
 
 def _buyable(area: dict | None, product: dict, product_infos: dict,
-             area_infos: dict, amount: int,
-             excludes: list[str]) -> tuple[dict, dict | None, int] | None:
-    """這個 (票區, 票種) 現在買不買得到？回 (票種即時票況, 票區即時票況, 可買張數)。"""
+             area_infos: dict, amount: int, excludes: list[str],
+             require_full: bool = False) -> tuple[dict, dict | None, int] | None:
+    """這個 (票區, 票種) 現在買不買得到？回 (票種即時票況, 票區即時票況, 可買張數)。
+
+    `require_full=True`：**剩餘量 < 指定張數就整個跳過**（不退而求其次買少一點）。
+    只在有限量旗標時檢查 —— 不限量（旗標 false）視為無限，永遠夠。
+    """
     area_info = area_infos.get(area.get("ticketAreaId")) if area is not None else None
     if area_info is not None and not area_ready(area_info):
         return None
@@ -365,6 +369,15 @@ def _buyable(area: dict | None, product: dict, product_infos: dict,
     info = product_infos.get(product.get("productId"))
     if not info or not product_ready(info):
         return None
+    if require_full:
+        # 票區跟票種各有自己的限量旗標，取兩者較小的（真正卡住的是比較緊的那個）；
+        # 都沒限量就是無限，跳過檢查。
+        supplies = [s for s in (_supply(info, "productLimit"),
+                                 _supply(area_info or {}, "ticketAreaLimit"))
+                    if s is not None]
+        remaining = min(supplies) if supplies else None
+        if remaining is not None and remaining < amount:
+            return None
     limit = info.get("purchaseLimit") or 0
     count = min(amount, limit) if limit else amount
     if count <= 0:
@@ -401,7 +414,8 @@ def pick_target(targets: list[tuple[dict | None, dict]],
                 product_infos: dict, area_infos: dict,
                 amount: int, exclude: str = "", balanced: bool = False,
                 matched_keys: set | None = None,
-                target: float | None = None) -> tuple[dict | None, dict, int] | None:
+                target: float | None = None,
+                require_full: bool = False) -> tuple[dict | None, dict, int] | None:
     """挑一個「真的買得到」的票種。回 (area or None, product, count) 或 None。
 
     `balanced=False`（嚴格清票，或使用者要照自己排的順序）→ **取優先序裡第一個買得到的**。
@@ -412,13 +426,15 @@ def pick_target(targets: list[tuple[dict | None, dict]],
     `desirability()`：關鍵字全沒中時改用價位契合度，而不是在官方排序上硬套名次衰減。
 
     count 會依 purchaseLimit 夾到上限（超買必被打回，寧可少買也不要整發作廢）。
+    `require_full=True` 時**剩餘量不足指定張數的票種直接不列入候選**（見 `_buyable`）。
     """
     excludes = [e.strip() for e in (exclude or "").split(";") if e.strip()]
     matched_keys = matched_keys or set()
 
     if not balanced:
         for area, product in targets:
-            got = _buyable(area, product, product_infos, area_infos, amount, excludes)
+            got = _buyable(area, product, product_infos, area_infos, amount, excludes,
+                           require_full)
             if got is None:
                 continue
             _info, _area_info, count = got
@@ -433,7 +449,8 @@ def pick_target(targets: list[tuple[dict | None, dict]],
     n_matched = len(matched_keys)
     best = None
     for area, product in targets:
-        got = _buyable(area, product, product_infos, area_infos, amount, excludes)
+        got = _buyable(area, product, product_infos, area_infos, amount, excludes,
+                       require_full)
         if got is None:
             continue
         info, area_info, count = got

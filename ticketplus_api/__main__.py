@@ -29,9 +29,9 @@ from tixcraftapi import alerts
 from LineBot import line_push
 
 from ticketplus_api import catalog, crypto, parsing, reserve as tp_reserve
-from ticketplus_api.session import (build_session, describe_token, extract_token,
-                                    make_keepalive, token_remaining, warmup_queue,
-                                    warmup_session)
+from ticketplus_api.session import (build_session, describe_token, extract_refresh_token,
+                                    extract_token, make_keepalive, refresh_access_token,
+                                    token_remaining, warmup_queue, warmup_session)
 from ticketplus_api import browser_session as tp_browser
 
 # 清票冷卻（對齊拓元 FSM，見 tixcraftapi/runner.py）：
@@ -40,6 +40,49 @@ from ticketplus_api import browser_session as tp_browser
 # 無總時間上限，跑到搶到 / 致命錯誤 / 使用者 STOP。
 CLEAR_COOLDOWN = 5.0
 BLOCKED_COOLDOWN = 8.0
+
+# 24h 掛機清票的 token 續命：TicketPlus 的 access_token 只活 60 分鐘，清票迴圈一跑就是
+# 幾小時，不續命的話一到期每發 enqueue/reserve 都被 errCode 103 打回、整場空轉。
+#   TOKEN_REFRESH_LEAD：剩不到這麼多秒就換一張（跟官方前端 `-3e5ms` 一致，留 5 分鐘餘裕）
+#   _TOKEN_CHECK_EVERY：沒必要每輪都解 JWT，隔這麼久檢查一次就夠（有 5 分鐘餘裕接得住）
+TOKEN_REFRESH_LEAD = 300.0
+_TOKEN_CHECK_EVERY = 30.0
+
+
+def _maybe_refresh_token(session, access_token: str, refresh_token: str,
+                         state: dict) -> tuple[str, str]:
+    """清票迴圈裡的 token 續命：access_token 剩不到 `TOKEN_REFRESH_LEAD` 秒就用
+    refresh_token 換一張。**refresh_token 是輪替的**，換完回傳更新後的兩顆。
+
+    只做**同步 HTTP 換發**，不碰瀏覽器 —— `_grab_loop` 是同步的，而寫回 `user` cookie
+    是 async CDP，這裡做不了。所以搶到票之後才由 `main_async` 把最新的 token 寫回瀏覽器
+    （不然結帳頁會用到清票期間作廢的舊 token 被登出）。
+
+    節流：每 `_TOKEN_CHECK_EVERY` 秒才真的解 JWT 看壽命，T-0 黃金窗口（前 30s）完全不碰。
+    """
+    now = time.monotonic()
+    if now - state["last_check"] < _TOKEN_CHECK_EVERY:
+        return access_token, refresh_token
+    state["last_check"] = now
+
+    remaining = token_remaining(access_token)
+    if remaining is None or remaining >= TOKEN_REFRESH_LEAD:
+        return access_token, refresh_token
+    if not refresh_token:
+        if not state.get("warned_no_refresh"):
+            state["warned_no_refresh"] = True
+            print(f"[TOKEN] ⚠ access_token 剩 {remaining:.0f}s 但手上沒有 refresh_token，"
+                  f"無法自動續命 —— 到期會被 errCode 103 中止（改用 userdata 模式可自動續）")
+        return access_token, refresh_token
+
+    print(f"[TOKEN] 清票中：access_token 剩 {remaining:.0f}s，用 refresh_token 換一張…")
+    access, new_refresh = refresh_access_token(session, refresh_token)
+    if access:
+        print(f"[TOKEN] ✅ 續命成功（{describe_token(access)}）")
+        return access, new_refresh or refresh_token
+    print("[TOKEN] ⚠ 續命失敗（refresh_token 可能也過期），先繼續用舊 token；"
+          "到期會被 errCode 103 中止")
+    return access_token, refresh_token
 
 
 def load_config_override():
@@ -108,7 +151,7 @@ async def _resolve_token(event_id: str):
 
 
 def poll_and_grab(session, plan: dict, token: str, poller,
-                  opened_at: float | None = None) -> dict:
+                  opened_at: float | None = None, refresh_token: str = "") -> dict:
     """無限清票直到搶到 / 致命錯誤 / 使用者 STOP。冷卻節奏借鑑拓元 FSM：
       - **未開賣**（沒有任何票種 onsale，等 T-0）→ 全速輪詢（golden，不冷卻）
       - **有可買票** → 立刻送單（golden，永不冷卻，第一拍黃金時間）
@@ -123,13 +166,14 @@ def poll_and_grab(session, plan: dict, token: str, poller,
     回 {"orderId": …} 或 {"error": …, "fatal": True}。"""
     poller.warm()      # 走過倒數的話已經暖好了，這裡是 no-op
     try:
-        return _grab_loop(session, poller, plan, token, plan["amount"], opened_at)
+        return _grab_loop(session, poller, plan, token, plan["amount"], opened_at,
+                          refresh_token)
     finally:
         poller.close()
 
 
 def _grab_loop(session, poller, plan: dict, token: str, amount: int,
-               opened_at: float | None = None) -> dict:
+               opened_at: float | None = None, refresh_token: str = "") -> dict:
     """`session` 是**主執行緒**那條（queue 網域已暖），送單一定要用它 ——
     偵測走 poller 的 worker 連線，但 enqueue/reserve 不能借那些 thread。
 
@@ -141,9 +185,16 @@ def _grab_loop(session, poller, plan: dict, token: str, amount: int,
     cooldown: dict[str, float] = {}   # per 票種：售完/被搶走後的清票冷卻
     attempt = 0
     log = _PollLog()
+    # token 續命用的可變狀態（access/refresh 都會輪替）；last_check 起點設 now，
+    # T-0 前 _TOKEN_CHECK_EVERY 秒內完全不檢查，不佔黃金窗口。
+    access_token, refresh_tok = token, refresh_token
+    token_state = {"last_check": time.monotonic()}
 
     while True:
         attempt += 1
+        # 清票長跑的 token 續命（節流過，T-0 不觸發）；換發後 access/refresh 一起更新
+        access_token, refresh_tok = _maybe_refresh_token(
+            session, access_token, refresh_tok, token_state)
         result, blocked, rtt = poller.next()
         if blocked:
             log.flush()
@@ -159,7 +210,8 @@ def _grab_loop(session, poller, plan: dict, token: str, amount: int,
                                      amount, exclude=config.EXCLUDE_AREA_KEYWORD,
                                      balanced=plan.get("balanced", False),
                                      matched_keys=plan.get("matched_keys"),
-                                     target=plan.get("target_price"))
+                                     target=plan.get("target_price"),
+                                     require_full=plan.get("require_full", False))
         if not target:
             open_now = parsing.sale_open(product_infos)
             if open_now:
@@ -192,12 +244,16 @@ def _grab_loop(session, poller, plan: dict, token: str, amount: int,
               f"{'（系統配位）' if seat else ''}"
               f" — **開賣後 {detect_s:.2f}s** 才送出（含暖機等所有前置，"
               f"第 {attempt} 輪，票況 RTT {rtt:.0f}ms）")
-        outcome = tp_reserve.grab(session, payload, token)
+        outcome = tp_reserve.grab(session, payload, access_token)
         if outcome.get("orderId"):
             outcome["seat_assignment"] = seat   # 決定搶到後要導去哪一頁
             outcome["detect_s"] = detect_s
             outcome["total_s"] = time.monotonic() - started
             outcome["bought"] = f"{label} ${product.get('price')} × {count} 張"
+            # 清票期間可能換過 token，把最新的兩顆帶回去，讓 main_async 在跳結帳頁前
+            # 寫回瀏覽器 cookie（否則結帳頁會拿到作廢的舊 token 被登出）
+            outcome["access_token"] = access_token
+            outcome["refresh_token"] = refresh_tok
             return outcome
         if outcome.get("fatal"):
             print(f"[GRAB] 中止: {outcome.get('error')}")
@@ -313,10 +369,16 @@ def build_plan(session, event_id: str) -> dict | None:
     # 快取，而變體數是 id 數的階乘 —— 嚴格清票把候選縮到 1~2 個票區時排列組合只剩 2 種，
     # 直接繞不過快取、偵測慢約 1 秒，剛好把併行偵測省下來的都賠回去。
     # 多帶 id 不用多送請求（本來就是一發查全部），純賺。
+    # getattr + 預設：config.py 是 gitignored，舊機器 pull 完可能還沒這個欄位，
+    # 不給預設會 AttributeError 整支起不來（跟 CLEAR_MODE 同一個理由）。
+    require_full = bool(getattr(config, "REQUIRE_FULL_AMOUNT", False))
+    if require_full:
+        print(f"[PLAN] 剩餘量不足 {amount} 張的票種直接跳過（不買少一點）")
+
     return {"session": sess, "session_id": session_id, "targets": targets,
             "amount": amount, "balanced": not strict,
             "matched_keys": matched_keys, "target_price": price_target,
-            "prebuilt": prebuilt,
+            "prebuilt": prebuilt, "require_full": require_full,
             "poll_products": [p["productId"] for p in products],
             "poll_areas": [a["ticketAreaId"] for a in areas]}
 
@@ -464,7 +526,15 @@ async def main_async():
     # 那條沒走過 keepalive 的路才需要它。
     if not config.ENABLE_TIME_WATCHER:
         warmup_queue(session)
-    outcome = poll_and_grab(session, plan, token, poller, opened_at)
+
+    # 24h 清票要能自動續命 → 先拿到 refresh_token 交給清票迴圈（迴圈裡輪替，見
+    # _maybe_refresh_token）。userdata 模式從瀏覽器的 user cookie 讀最新的（_refresh_token_
+    # if_stale 若剛換過，寫回的也是這顆）；手貼模式從 config.COOKIE 讀。
+    if tab is not None:
+        refresh_tok = extract_refresh_token(await tp_browser.read_user_cookie(tab))
+    else:
+        refresh_tok = extract_refresh_token(config.COOKIE)
+    outcome = poll_and_grab(session, plan, token, poller, opened_at, refresh_tok)
 
     if outcome.get("orderId"):
         alerts.play_checkout()
@@ -483,6 +553,13 @@ async def main_async():
                                      amount=str(plan["amount"]), fee=config.TICKET_FEE,
                                      platform="TICKETPLUS")
         if tab is not None:
+            # 清票期間若換過 token，先把最新的寫回瀏覽器 cookie，再跳結帳頁 ——
+            # 不然結帳頁 SPA 會拿到清票時作廢的舊 token，直接把客人登出、付不了款。
+            new_access = outcome.get("access_token")
+            if new_access and new_access != token:
+                await tp_browser.write_user_cookie(
+                    tab, new_access, outcome.get("refresh_token") or "")
+                print("[TOKEN] 已把清票期間換發的最新 token 寫回瀏覽器（結帳頁才不會被登出）")
             await tp_browser.goto_checkout(tab, event_id, plan["session_id"], seat)
             # 導到結帳頁後截圖推給客人證明搶到（截圖失敗不影響——票已到手）
             if config.ENABLE_LINE_NOTIFY and config.LINE_USER_ID:

@@ -76,6 +76,7 @@
             <div class="field f-narrow flags">
               <label class="check"><input type="checkbox" class="f-timer"><span>TIMER</span></label>
               <label class="check"><input type="checkbox" class="f-proxy"><span>PROXY POOL</span></label>
+              <label class="check" title="勾選 = 剩餘量不足 QTY 張的票種直接跳過，不會退而求其次買少一點"><input type="checkbox" class="f-requirefull"><span>剩餘不足不買</span></label>
             </div>
 
             <div class="field f-narrow"><label>出口 IP</label><select class="fld f-bindip" title="多 IP 架構：選一顆 OCI VNIC 上的次要私有 IP，這張卡的所有流量（curl_cffi + Chrome）都從對應的公網 IP 出去，取代 proxy 做多開隔離。清單是直接讀機器網卡的，由 rotate_ips.py --sync-os 在開機時跟 OCI 對帳掛上。選「(預設出口)」= 走主 IP，多張卡片會共用同一個對外 IP"></select></div>
