@@ -151,7 +151,8 @@ async def _resolve_token(event_id: str):
 
 
 def poll_and_grab(session, plan: dict, token: str, poller,
-                  opened_at: float | None = None, refresh_token: str = "") -> dict:
+                  opened_at: float | None = None, refresh_token: str = "",
+                  direct_first: bool = False) -> dict:
     """無限清票直到搶到 / 致命錯誤 / 使用者 STOP。冷卻節奏借鑑拓元 FSM：
       - **未開賣**（沒有任何票種 onsale，等 T-0）→ 全速輪詢（golden，不冷卻）
       - **有可買票** → 立刻送單（golden，永不冷卻，第一拍黃金時間）
@@ -167,13 +168,14 @@ def poll_and_grab(session, plan: dict, token: str, poller,
     poller.warm()      # 走過倒數的話已經暖好了，這裡是 no-op
     try:
         return _grab_loop(session, poller, plan, token, plan["amount"], opened_at,
-                          refresh_token)
+                          refresh_token, direct_first)
     finally:
         poller.close()
 
 
 def _grab_loop(session, poller, plan: dict, token: str, amount: int,
-               opened_at: float | None = None, refresh_token: str = "") -> dict:
+               opened_at: float | None = None, refresh_token: str = "",
+               direct_first: bool = False) -> dict:
     """`session` 是**主執行緒**那條（queue 網域已暖），送單一定要用它 ——
     偵測走 poller 的 worker 連線，但 enqueue/reserve 不能借那些 thread。
 
@@ -189,12 +191,46 @@ def _grab_loop(session, poller, plan: dict, token: str, amount: int,
     # T-0 前 _TOKEN_CHECK_EVERY 秒內完全不檢查，不佔黃金窗口。
     access_token, refresh_tok = token, refresh_token
     token_state = {"last_check": time.monotonic()}
+    fire_direct = direct_first and bool(plan.get("targets"))
 
     while True:
         attempt += 1
         # 清票長跑的 token 續命（節流過，T-0 不觸發）；換發後 access/refresh 一起更新
         access_token, refresh_tok = _maybe_refresh_token(
             session, access_token, refresh_tok, token_state)
+
+        # ── 準點直送：第一發跳過偵測，直接對第一志願送 enqueue ──
+        # 省掉偵測那一發 RTT（票種少的場被 CDN 舊快取拖到晚 1 秒的元凶）。沒中就
+        # fall through 進正常偵測清票。**開賣前送會空排**，所以要靠 FIRE_ON_TIME 的
+        # 準點觸發（lead=0）+ GRAB_DELAY_AFTER_OPEN 的安全邊際卡在「開賣後一點點」。
+        if fire_direct:
+            fire_direct = False
+            area, product = plan["targets"][0]
+            pre = plan.get("prebuilt", {}).get(product["productId"])
+            if pre is not None:
+                payload, seat = pre, False
+            else:
+                seat = bool(plan["session"].get("ticketArea"))
+                payload = tp_reserve.build_payload(product["productId"], amount,
+                                                   seat_assignment=seat,
+                                                   serial_number=config.PRESALE_CODE)
+            detect_s = time.monotonic() - started
+            label = parsing.target_label(area, product)
+            print(f"[GRAB] ⚡準點直送（跳過偵測）: {label} ${product.get('price')} × {amount} 張"
+                  f"{'（系統配位）' if seat else ''} — 開賣後 {detect_s:.2f}s")
+            outcome = tp_reserve.grab(session, payload, access_token)
+            if outcome.get("orderId"):
+                outcome.update({"seat_assignment": seat, "detect_s": detect_s,
+                                "total_s": time.monotonic() - started,
+                                "bought": f"{label} ${product.get('price')} × {amount} 張",
+                                "access_token": access_token, "refresh_token": refresh_tok})
+                return outcome
+            if outcome.get("fatal"):
+                print(f"[GRAB] 準點直送中止: {outcome.get('error')}")
+                return outcome
+            print(f"[GRAB] 準點直送沒中（{outcome.get('error')}）→ 轉偵測清票")
+            continue
+
         result, blocked, rtt = poller.next()
         if blocked:
             log.flush()
@@ -501,9 +537,19 @@ async def main_async():
                                 float(config.RETRY_INTERVAL or 0.3))
     print(f"[POLL] {poller.describe()}")
 
+    # 準點直送：跳過偵測、第一發直接送第一志願。倒數要用 lead=0（正好準點觸發），
+    # 不能提早 0.4 秒 —— 提早送 enqueue 會落在開賣前、空排出不來。
+    fire_on_time = bool(getattr(config, "FIRE_ON_TIME", False))
+    if fire_on_time:
+        _margin = float(getattr(config, "GRAB_DELAY_AFTER_OPEN", 0.0) or 0.0)
+        print("[GRAB] 準點直送模式：倒數 lead=0、第一發跳過偵測直接送第一志願"
+              + ("" if _margin > 0 else
+                 "（⚠ 建議把「開賣後延遲」設 0.2~0.3s 當安全邊際，否則可能早到卡空排）"))
+
     if config.ENABLE_TIME_WATCHER:
-        watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL, lead_seconds=0.4)
-        print(f"[TIMER] 目標時間: {config.TARGET_START_TIME}")
+        lead = 0.0 if fire_on_time else 0.4
+        watcher = TimeWatcher(config.TARGET_START_TIME, config.TIME_WATCH_URL, lead_seconds=lead)
+        print(f"[TIMER] 目標時間: {config.TARGET_START_TIME}（lead {lead}s）")
         ping = make_keepalive(session, product_ids)
 
         def _tick(remaining: float):
@@ -541,7 +587,8 @@ async def main_async():
         refresh_tok = extract_refresh_token(await tp_browser.read_user_cookie(tab))
     else:
         refresh_tok = extract_refresh_token(config.COOKIE)
-    outcome = poll_and_grab(session, plan, token, poller, opened_at, refresh_tok)
+    outcome = poll_and_grab(session, plan, token, poller, opened_at, refresh_tok,
+                            direct_first=fire_on_time)
 
     if outcome.get("orderId"):
         alerts.play_checkout()

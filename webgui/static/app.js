@@ -156,6 +156,7 @@ function renderCard(item) {
   bindCheck (card, ".f-timer",    cfg.ENABLE_TIME_WATCHER);
   bindCheck (card, ".f-proxy",    cfg.ENABLE_PROXY_POOL);
   bindCheck (card, ".f-requirefull", cfg.REQUIRE_FULL_AMOUNT);
+  bindCheck (card, ".f-fireontime", cfg.FIRE_ON_TIME);
   // 出口 IP：值存空字串代表「走主 IP」，但下拉不能有空白選項，所以用一個顯示用的
   // 標籤代表它（readCardConfig 再轉回空字串）。機器上沒掛次要 IP 時就只有這一個選項。
   bindSelect(card, ".f-bindip", LOCAL_IPS,
@@ -261,6 +262,7 @@ function readCardConfig(card) {
     ENABLE_PROXY_POOL:       card.querySelector(".f-proxy").checked,
     REQUIRE_FULL_AMOUNT:     card.querySelector(".f-requirefull").checked,
     GRAB_DELAY_AFTER_OPEN:   parseFloat(card.querySelector(".f-grabdelay").value) || 0,
+    FIRE_ON_TIME:            card.querySelector(".f-fireontime").checked,
     LOCAL_BIND_IP:           _bindIpValue(card),
     LINE_USER_ID:            card.querySelector(".f-lineuser").value,
     TICKET_FEE:              card.querySelector(".f-fee").value,

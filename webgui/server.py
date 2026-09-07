@@ -45,6 +45,7 @@ class InstanceConfig(BaseModel):
     TICKET_AMOUNT: str = "1"
     REQUIRE_FULL_AMOUNT: bool = False   # 剩餘量 < TICKET_AMOUNT 就跳過，不買少一點
     GRAB_DELAY_AFTER_OPEN: float = 0.0  # 遠大：開賣後延遲幾秒才送單(避開瞬間 CDN 舊快取)
+    FIRE_ON_TIME: bool = False          # 遠大：準點直送(跳過偵測、第一發直接送第一志願)
     AREA_KEYWORD: str = ""
     AREA_AUTO_SELECT_MODE: str = "關鍵字優先"
     CLEAR_MODE: str = "寬鬆"
