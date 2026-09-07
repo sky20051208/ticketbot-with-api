@@ -517,6 +517,13 @@ async def main_async():
     # 所以要在這裡取時間，不能等進了 poll_and_grab 才取。
     opened_at = time.monotonic()
 
+    # 開賣後延遲送單（避開開賣瞬間：CDN 還回舊快取「未開賣」、送 enqueue 只會空排）。
+    # 刻意擺在 opened_at 之後 —— 這樣 [GRAB] 的「開賣後 X.Xs」會誠實把這段等待算進去。
+    grab_delay = float(getattr(config, "GRAB_DELAY_AFTER_OPEN", 0.0) or 0.0)
+    if grab_delay > 0:
+        print(f"[TIMER] 開賣後刻意延遲 {grab_delay:.1f}s 才送單（GRAB_DELAY_AFTER_OPEN）")
+        await asyncio.sleep(grab_delay)
+
     token = await _refresh_token_if_stale(token, tab)
     # queue 網域要在 T-0 是熱的，但**倒數期間 make_keepalive 已經一直在暖它**
     # （log 的「[KEEPALIVE] 排隊連線續命」就是）。有倒數還在這裡再暖一發，是站在關鍵

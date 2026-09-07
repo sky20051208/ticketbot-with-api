@@ -144,6 +144,7 @@ function renderCard(item) {
   bindText  (card, ".f-slug",     cfg.ACTIVITY_SLUG);
   bindText  (card, ".f-time",     cfg.TARGET_START_TIME);
   bindText  (card, ".f-qty",      cfg.TICKET_AMOUNT);
+  bindText  (card, ".f-grabdelay", cfg.GRAB_DELAY_AFTER_OPEN);
   bindSelect(card, ".f-areamode", AREA_MODES, cfg.AREA_AUTO_SELECT_MODE);
   bindSelect(card, ".f-clearmode", CLEAR_MODES, cfg.CLEAR_MODE);
   bindText  (card, ".f-area",     cfg.AREA_KEYWORD);
@@ -259,6 +260,7 @@ function readCardConfig(card) {
     ENABLE_TIME_WATCHER:     card.querySelector(".f-timer").checked,
     ENABLE_PROXY_POOL:       card.querySelector(".f-proxy").checked,
     REQUIRE_FULL_AMOUNT:     card.querySelector(".f-requirefull").checked,
+    GRAB_DELAY_AFTER_OPEN:   parseFloat(card.querySelector(".f-grabdelay").value) || 0,
     LOCAL_BIND_IP:           _bindIpValue(card),
     LINE_USER_ID:            card.querySelector(".f-lineuser").value,
     TICKET_FEE:              card.querySelector(".f-fee").value,

@@ -26,6 +26,7 @@ AREA_KEYWORD = ""                # 區域/價格關鍵字篩選（空字串 = �
 AREA_AUTO_SELECT_MODE = "關鍵字優先"  # 選位策略: 關鍵字優先 / 由上而下 / 由下而上 / 隨機
 CLEAR_MODE = "寬鬆"               # 清票模式: 嚴格(只買關鍵字命中的) / 寬鬆(位置與剩餘量取平衡)
 REQUIRE_FULL_AMOUNT = False      # True = 剩餘量 < TICKET_AMOUNT 的票種直接跳過(不買少一點)
+GRAB_DELAY_AFTER_OPEN = 0.0      # 遠大專用：開賣後延遲幾秒才送單(避開開賣瞬間的 CDN 舊快取/空排)；0=不延遲
 EXCLUDE_AREA_KEYWORD = "輪椅;身障;身心;障礙;Restricted View;燈柱遮蔽;視線不完整;身障票"
 DATE_KEYWORD = ""                # 場次日期篩選（空字串 = 選第一場）
 PRESALE_CODE = ""                # 會員碼 / presale code（空字串 = 不使用，頁面有答案會自動抓）
