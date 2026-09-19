@@ -2,7 +2,7 @@
 
 功能：
 - 管理多個 instance（profiles/acc_{id}/）
-- spawn `python -m tixcraftapi`（拓元）/ `python -m kktix_api`（KKTIX）子進程，依平台分派
+- 依平台 spawn 子進程：`tixcraftapi`（拓元）/ `kktix_api` / `ticketplus_api` / `kham_api`（寬宏）
 - 透過 pause.lock 暫停/繼續
 - WebSocket 推 stdout 即時 log
 """
@@ -31,7 +31,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 CHROME_PROFILES_DIR = PROJECT_DIR / "chrome_profiles"
 # chrome profile 按平台分子資料夾：chrome_profiles/<平台>/<名字>/。這些名字是子資料夾，
 # 不是 profile 本身（掃舊扁平 profile 時要排除）。
-PLATFORM_SUBDIRS = {"tixcraft", "kktix", "ticketplus"}
+PLATFORM_SUBDIRS = {"tixcraft", "kktix", "ticketplus", "kham"}
 
 DEFAULT_EXCLUDE = "輪椅;身障;身心;障礙;Restricted View;燈柱遮蔽;視線不完整;身障票"
 # chrome profile 下拉選單裡代表「不用 user-data-dir、用手貼 COOKIE」的選項
@@ -432,7 +432,8 @@ async def _start_one(id: int, req: StartReq) -> dict:
 
     # 依平台分派，其餘（拓元）→ tixcraftapi
     module = {"KKTIX": "kktix_api",
-              "TICKETPLUS": "ticketplus_api"}.get(inst.config.PLATFORM, "tixcraftapi")
+              "TICKETPLUS": "ticketplus_api",
+              "KHAM": "kham_api"}.get(inst.config.PLATFORM, "tixcraftapi")
     args = [
         sys.executable, "-u", "-m", module,
         "--config", str(config_path(id)),

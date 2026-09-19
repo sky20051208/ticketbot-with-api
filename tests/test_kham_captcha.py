@@ -1,35 +1,49 @@
-"""寬宏驗證碼模型 smoke test（自訓 ONNX + onnxruntime）。
+"""寬宏驗證碼辨識測試（ddddocr + 限制字元集）。
 
-需 onnxruntime / Pillow / numpy；沒裝就 skip。樣本標註經人眼確認（2H5G）。
+fixtures/kham/captcha_live_<答案>.png 是 2026-09-17 現場抓的圖，答案經人眼確認。
+大部分是「ddddocr 原樣會錯、限制字元集後才對」的（9→Q、T→7、N→IV 這類），
+換 ddddocr 版本或改解碼時，這組最先壞。沒裝 ddddocr 就 skip。
 """
+import glob
 import os
+import re
+
 import pytest
 
 from conftest import FIXTURES
 
-SAMPLE = os.path.join(FIXTURES, "kham", "captcha_sample_2H5G.png")
+SAMPLES = sorted(glob.glob(os.path.join(FIXTURES, "kham", "captcha_*.png")))
 
 
-def _load_captcha_module():
+@pytest.fixture(scope="module")
+def captcha():
     try:
         from kham_api import captcha
-        return captcha
     except Exception as e:
         pytest.skip(f"captcha 依賴未安裝: {e!r}")
+    return captcha
 
 
-def test_recognize_known_sample():
-    captcha = _load_captcha_module()
-    if not os.path.exists(SAMPLE):
-        pytest.skip("缺 captcha 樣本 fixture")
-    got = captcha.recognize(open(SAMPLE, "rb").read())
-    assert got == "2H5G", f"辨識為 {got}"
+def _answer(path):
+    return re.search(r"_([0-9A-Z]{4})\.png$", path).group(1)
 
 
-def test_recognize_shape():
-    """任意輸入回 4 碼大寫英數（模型輸出格式固定）。"""
-    captcha = _load_captcha_module()
-    if not os.path.exists(SAMPLE):
-        pytest.skip("缺 captcha 樣本 fixture")
-    got = captcha.recognize(open(SAMPLE, "rb").read())
-    assert len(got) == 4 and got.isalnum() and got.isupper()
+def test_fixtures_present():
+    assert len(SAMPLES) >= 10
+
+
+@pytest.mark.parametrize("path", SAMPLES, ids=_answer)
+def test_recognize_live_sample(captcha, path):
+    with open(path, "rb") as f:
+        assert captcha.recognize(f.read()) == _answer(path)
+
+
+def test_output_limited_to_charset(captcha):
+    for path in SAMPLES:
+        with open(path, "rb") as f:
+            got = captcha.recognize(f.read())
+        assert set(got) <= set(captcha.CHARSET), got
+
+
+def test_bad_input_returns_empty(captcha):
+    assert captcha.recognize(b"not an image") == ""

@@ -12,7 +12,8 @@ from curl_cffi import requests as cf_requests
 from tixcraftapi import BASE
 from tixcraftapi.captcha import CaptchaPrefetch, fetch_captcha_image, solve_captcha
 from tixcraftapi.errors import raise_if_blocked
-from tixcraftapi.parsing import parse_ticket_form, find_ticket_codes
+from tixcraftapi.parsing import (parse_ticket_form, find_ticket_codes,
+                                 parse_form_errors, is_captcha_error)
 from tixcraftapi.session import csrf_from_cookie
 from captchaAI.predict import recognize_captcha
 
@@ -160,9 +161,18 @@ def submit_ticket(session: cf_requests.Session, ticket_url: str, headers: dict,
         if status in (301, 302) and loc:
             return loc if loc.startswith("http") else BASE + loc
 
-        # 200 = 驗證碼錯或其他表單錯誤
+        # 200 = 表單被打回。**先讀頁面真正的錯誤訊息**，別一律當驗證碼錯（多票種/售完
+        # 的帳號會卡在這裡空轉 5 輪還誤報成驗證碼）。
         if status == 200:
-            print(f"[TICKET] 驗證碼錯誤，換一張重試 ({round_n}/{max_rounds})")
+            errors = parse_form_errors(post_res.text)
+            err_txt = " / ".join(errors) if errors else "(頁面沒有明確錯誤訊息)"
+            if not is_captcha_error(errors):
+                # 不是驗證碼問題（售完/額滿/場次關閉/張數…）→ 重試驗證碼一百次也沒用，
+                # 直接交回 FSM 重新評估（會 fallback 回 GAME/AREA 重挑）。
+                print(f"[TICKET] 第{round_n}輪 200，**不是驗證碼問題**：{err_txt} → 交回 FSM")
+                return None
+            print(f"[TICKET] 第{round_n}輪 200 驗證碼錯誤，換一張重試 "
+                  f"({round_n}/{max_rounds})｜頁面訊息：{err_txt}")
             if used_fast_path:
                 # 200 分不出是「驗證碼錯」還是「快取的表單結構過期」，一次就退回正常流程：
                 # 第一發沒中的話後面也不差那個 RTT，安全優先。

@@ -20,8 +20,9 @@ onnxruntime>=1.16
 numpy>=1.24
 Pillow>=10.0
 
-# 寬宏驗證碼：自訓小 ONNX（kham_api/kham_captcha.onnx ~1.4MB），吃上面的 onnxruntime，無額外依賴
-# （訓練資料曾用 ddddocr 自動標註 bootstrap，正式執行不需要 ddddocr）
+# 寬宏驗證碼：ddddocr + 限制字元集（現場實測 96.8%，舊的自訓 ONNX 只有 80%）。
+# 鎖版本：kham_api/captcha.py 自己解 probability 輸出，1.6 的介面沒驗證過
+ddddocr==1.5.6
 
 # 對時 + HTTP
 requests>=2.31

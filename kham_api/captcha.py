@@ -1,59 +1,67 @@
-"""寬宏驗證碼辨識 — 自訓小 ONNX（90x25 灰階 → 4 碼 x 36 類 CNN，~1.4MB）。
+"""寬宏驗證碼辨識 — ddddocr + 限制字元集。
 
-又準又快又小：
-  - 小：kham_captcha.onnx ~1.4MB（取代 ddddocr ~10MB），吃既有的 onnxruntime，打包不變大。
-  - 快：CPU 推論每張 ~1~3ms；`warmup()` 開賣前先載 session。
-  - 準：對寬宏字型 val 逐字 ~98% / 全對 ~93%，搭配「送單失敗換一張重試」實際成功率 ~99.9%。
+寬宏的 /pic.aspx 是 4 碼、大小寫不敏感，而且**只會出現 25 種字**：現場抓 125 張人工標註，
+從沒出現過 0 1 7 I J L O Q U V Z（故意排掉容易搞混的字）。ddddocr 原樣跑會把 9 認成 q、
+T 認成 7、N 認成 IV，把輸出限制在這 25 個字裡，這類錯就全部消失。
 
-訓練腳本見 scratchpad/train_kham_captcha.py（用 ddddocr 自動標註 bootstrap + 人工裁決分歧）。
-拓元用 captchaAI/predict.py（另一套自訓 CRNN+CTC），兩者不共用。
+實測（2026-09-17，現場 125 張人工標註；後 49 張是規則定好之後才抓的 held-out）：
+  舊的自訓 ONNX（kham_captcha.onnx，已刪）   80%
+  ddddocr 原樣                               90%
+  ddddocr + 限制字元集（本檔）               96.8%，held-out 49/49
+剩下的錯幾乎都是「斜體 B → 3」。每張約 20ms（要拿機率表自己解碼，比原樣慢 ~13ms）。
+
+拓元用 captchaAI/predict.py（自訓 CRNN+CTC），兩者不共用。
 """
 import io
-from pathlib import Path
 
+import ddddocr
 import numpy as np
-import onnxruntime as ort
 from PIL import Image
 
-_MODEL_PATH = Path(__file__).parent / "kham_captcha.onnx"
-_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-_W, _H = 90, 25
-_SESSION = None
+CHARSET = "2345689ABCDEFGHKMNPRSTWXY"
+_OCR = None
+_MASK = None  # 對應 ddddocr charset 的布林遮罩（index 0 是 CTC blank，要留著）
 
 
-def _get_session():
-    global _SESSION
-    if _SESSION is None:
-        if not _MODEL_PATH.exists():
-            raise FileNotFoundError(f"找不到 ONNX model: {_MODEL_PATH}")
-        _SESSION = ort.InferenceSession(str(_MODEL_PATH), providers=["CPUExecutionProvider"])
-        print(f"[CAPTCHA] 寬宏 OCR 已載入 ({_MODEL_PATH.name})")
-    return _SESSION
+def _get_ocr():
+    global _OCR
+    if _OCR is None:
+        _OCR = ddddocr.DdddOcr(show_ad=False)
+        print("[CAPTCHA] 寬宏 OCR 已載入 (ddddocr)")
+    return _OCR
 
 
-def _preprocess(image_bytes: bytes) -> np.ndarray:
-    im = Image.open(io.BytesIO(image_bytes)).convert("L").resize((_W, _H))
-    arr = np.asarray(im, dtype=np.float32) / 255.0
-    return arr.reshape(1, 1, _H, _W)
+def _decode(charsets: list[str], probability) -> str:
+    """CTC 解碼：每個時間步只在允許的字裡挑最大 → 去連續重複 → 去 blank。"""
+    global _MASK
+    if _MASK is None or len(_MASK) != len(charsets):
+        _MASK = np.array([c == "" or (len(c) == 1 and c.upper() in CHARSET) for c in charsets])
+    prob = np.asarray(probability, dtype=np.float32).reshape(-1, len(charsets))
+    best = np.where(_MASK, prob, -1.0).argmax(axis=1)
+    out, last = [], 0
+    for i in best:
+        if i != last and i != 0:
+            out.append(charsets[i])
+        last = i
+    return "".join(out).upper()
 
 
 def warmup():
-    """開賣前呼叫：載入 ONNX session + 跑一張 dummy，避免 T-0 才付初始化成本。"""
+    """開賣前呼叫：載入模型 + 跑一張空白圖，避免 T-0 才付初始化成本（載入約 1 秒）。"""
     try:
-        sess = _get_session()
-        sess.run(None, {sess.get_inputs()[0].name: np.zeros((1, 1, _H, _W), dtype=np.float32)})
+        buf = io.BytesIO()
+        Image.new("RGB", (90, 25), "white").save(buf, format="PNG")
+        recognize(buf.getvalue())
         print("[CAPTCHA] 寬宏 OCR 已暖機")
     except Exception as e:
         print(f"[CAPTCHA] warmup 失敗（不致命）: {e!r}")
 
 
 def recognize(image_bytes: bytes) -> str:
-    """回 4 碼（大寫英數）。寬宏驗證碼大小寫不敏感。失敗回 ""。"""
+    """回辨識結果（大寫）。正常是 4 碼，長度不對由呼叫端決定要不要換一張。失敗回 ""。"""
     try:
-        sess = _get_session()
-        logits = sess.run(None, {sess.get_inputs()[0].name: _preprocess(image_bytes)})[0]
-        idx = logits[0].argmax(axis=-1)  # [4]
-        return "".join(_CHARSET[i] for i in idx)
+        res = _get_ocr().classification(image_bytes, probability=True)
+        return _decode(res["charsets"], res["probability"])
     except Exception as e:
         print(f"[CAPTCHA] 辨識失敗: {e!r}")
         return ""

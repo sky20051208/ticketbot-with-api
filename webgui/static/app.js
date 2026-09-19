@@ -1,7 +1,7 @@
 const $  = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
-const PLATFORMS  = ["TIXCRAFT", "KKTIX", "TICKETPLUS"];
+const PLATFORMS  = ["TIXCRAFT", "KKTIX", "TICKETPLUS", "KHAM"];
 const AREA_MODES = ["關鍵字優先", "由上而下", "由下而上", "隨機"];
 const CLEAR_MODES = ["寬鬆", "嚴格"];
 const MANUAL_COOKIE = "(手貼COOKIE)";

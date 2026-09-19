@@ -262,6 +262,8 @@ _SITE_INFO = {
     "TIXCRAFT":   ("拓元",           "https://tixcraft.com/",        "會員專區 → 訂單管理 → 完成付款",   10),
     "TICKETPLUS": ("遠大 TicketPlus", "https://ticketplus.com.tw/",   "會員中心 → 我的訂單 → 完成付款",   10),
     "KKTIX":      ("KKTIX",          "https://kktix.com/",           "我的票券 → 完成付款",              None),
+    # 寬宏的購物車保留時間、客人另一台裝置登入看不看得到購物車，都還沒實測過
+    "KHAM":       ("寬宏",           "https://kham.com.tw/",         "右上角購物車 → 結帳",              None),
 }
 
 

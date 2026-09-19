@@ -91,6 +91,32 @@ def parse_ticket_form(html: str) -> dict:
             if "_csrf" in k or "TicketForm" in k}
 
 
+# ticket 頁 POST 後回 200（表單重新 render）時，Yii2 把欄位錯誤放 .help-block-error，
+# 場次層錯誤（售完/額滿/場次關閉）放 .alert。抓出來才知道 200 到底是不是驗證碼問題 ——
+# 別再一律當「驗證碼錯」白重試（2026-09 一個多票種帳號實測：200 其實是別的錯，卻被誤報）。
+_ERR_RE = re.compile(r'<[^>]*class="[^"]*help-block-error[^"]*"[^>]*>(.*?)</', re.DOTALL)
+_ALERT_RE = re.compile(r'<[^>]*class="[^"]*alert[^"]*"[^>]*>(.*?)</div>', re.DOTALL)
+
+
+def parse_form_errors(html: str) -> list[str]:
+    """從 ticket 頁 200 回應抽真正的錯誤訊息（去標籤去空白、去重）。抓不到回 []。"""
+    msgs: list[str] = []
+    for raw in _ERR_RE.findall(html) + _ALERT_RE.findall(html):
+        t = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", raw)).strip()
+        if t and t not in msgs:
+            msgs.append(t)
+    return msgs
+
+
+def is_captcha_error(errors: list[str]) -> bool:
+    """這批錯誤訊息是不是「驗證碼」問題。空 list（沒抓到訊息）也當成 True ——
+    保留舊行為（tixcraft 驗證碼錯很多時只重載頁面、不一定 render 明確訊息）。"""
+    if not errors:
+        return True
+    return any(("驗證碼" in e) or ("captcha" in e.lower()) or ("verif" in e.lower())
+               for e in errors)
+
+
 def find_ticket_codes(payload: dict) -> list[str]:
     codes = []
     for k in payload:

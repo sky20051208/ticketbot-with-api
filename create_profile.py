@@ -4,6 +4,7 @@
     python create_profile.py --name 帳號名                       # 預設 --platform tixcraft
     python create_profile.py --name 帳號名 --platform kktix
     python create_profile.py --name 帳號名 --platform ticketplus
+    python create_profile.py --name 帳號名 --platform kham        # 寬宏（登入頁有 4 碼驗證碼，手動填）
     python create_profile.py --name 帳號名 --fixed-ip     # 同 name 每次拿同一個 IP
     python create_profile.py --name 帳號名 --proxy http://user:pass@host:port
     python create_profile.py --name 帳號名 --url https://xxx/login   # 自訂登入頁，蓋掉 --platform
@@ -75,6 +76,7 @@ PLATFORM_LOGIN = {
     "kktix": "https://kktix.com/users/sign_in",
     # TicketPlus 沒有獨立登入頁（登入是全站共用的 dialog），開首頁按右上角登入
     "ticketplus": "https://ticketplus.com.tw/",
+    "kham": "https://kham.com.tw/application/utk13/utk1306_.aspx",
 }
 
 # 純首頁（proxy 暖機用）。剛換一個新代理 IP 就直衝 Facebook/Google OAuth，對這些平台的
@@ -84,6 +86,7 @@ PLATFORM_HOME = {
     "tixcraft": "https://tixcraft.com/",
     "kktix": "https://kktix.com/",
     "ticketplus": "https://ticketplus.com.tw/",
+    "kham": "https://kham.com.tw/",
 }
 
 # Chrome 常見安裝位置。美東 VPS 也要能建 profile —— 那台的登入態必須在那台上取得，

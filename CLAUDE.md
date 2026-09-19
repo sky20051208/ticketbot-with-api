@@ -8,6 +8,7 @@
   - `TIXCRAFT` → `python -m tixcraftapi`（curl_cffi 打 API，FSM 架構；userdata cookie 模式用 Selenium 開 Chrome 登入）
   - `KKTIX` → `python -m kktix_api`（nodriver 開瀏覽器登入 → 純封包偵測：base_info 抓票種目錄 + register_info 高頻偵測開賣 → fetch 送單。票種是 Angular 前端渲染，raw HTML 拿不到，所以走 KKTIX JSON API。slug 要用「場次」slug 非「活動」slug）
   - `TICKETPLUS` → `python -m ticketplus_api`（見下方專節；全 JSON API，**開賣偵測不需要登入**）
+  - `KHAM`（寬宏）→ `python -m kham_api`（nodriver 登入 → 全程頁內 fetch 打 ASP.NET 頁面；驗證碼 ddddocr + 限制 25 字元集；後端在台灣 GCP，不能搬美東。細節見 [kham_api/__init__.py](kham_api/__init__.py)）
 - **瀏覽器層分兩套（刻意的，不要統一）**：拓元走 **Selenium**（[browser_login.py](browser_login.py) / [finalize.py](tixcraftapi/finalize.py)），KKTIX / 寬宏 / 遠端登入走 **nodriver**。2026-07-26 曾把拓元改成 nodriver，實測被鎖，已整包回退——**不要再改**。改 nodriver 那次踩到的兩個坑（哪天真要動再看）：`Network.clearBrowserCookies` 是「整個 profile 全域清空」，連 Google / FB 登入 cookie 一起殺（selenium 的 `delete_all_cookies()` 只清目前 domain，語意完全不同，賠掉一個 profile）；`tab.evaluate` 值 falsy 時回原始 RemoteObject，`bool()` 恆真
 - **驗證碼**：統一走 [captchaAI/predict.py](captchaAI/predict.py) 的 `recognize_captcha(bytes)`（自訓 ONNX），[tixcraftapi/captcha.py](tixcraftapi/captcha.py) 呼叫它，**不要自己建 OCR 實例**
 - **GUI**：[webgui/](webgui/) 是 FastAPI + 原生 JS 的本機網頁版（`python run_webgui.py` 啟動），每張卡片對應一個 Python 子進程
